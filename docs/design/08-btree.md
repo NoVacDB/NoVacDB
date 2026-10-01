@@ -1,6 +1,6 @@
 # 08 — B+Tree Indexes (`internal/btree`)
 
-Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2, 3.3.** Written and approved under the standing autonomous-mode instruction.
 
 The whole phase is designed in one document because its parts constrain each other: how splits and merges are done (3.2, 3.3) is dictated by how they must be latched and logged (3.5).
 
@@ -87,6 +87,13 @@ flowchart TD
 4. If the root is internal and has no keys left, collapse it (2.3).
 
 Each repair step leaves a valid tree, so it can be its own log record.
+
+Notes from the implementation:
+
+- The walk up continues past a node that is not underfull: a node higher on the held path may be underfull from before (a crash, a skipped redistribution) and gets repaired opportunistically.
+- A redistribution only happens when the two nodes do not fit in one, so the sibling holds more than three quarters of a node; filling the underfull node to a quarter cannot drain it. The check that a move would leave the sibling underfull is kept as a guard but is effectively unreachable.
+- Merges and redistributions are built on scratch copies and copied in only when they are known to fit, so a failure changes nothing.
+- In an unlogged tree a freed page is given back to the data file once nothing is latched. A reader coupled through the page may still hold its pin for an instant after releasing its latch, so freeing retries on `ErrPagePinned`.
 
 ### 2.6 Lookups and range scans (Steps 3.1, 3.4)
 

@@ -265,6 +265,7 @@ func (t *Tree) splitChild(ctx context.Context, pref *storage.PageRef, parent nod
 	}
 	cref.MarkDirty()
 	rref.MarkDirty()
+	t.ops.splits[kindIndex(child)].Add(1)
 	copy(child.b, left)
 	copy(rref.Data(), right)
 	return rref, h.sep, nil
@@ -307,6 +308,7 @@ func (t *Tree) splitRoot(ctx context.Context, ref *storage.PageRef, root node) e
 	ref.MarkDirty()
 	lref.MarkDirty()
 	rref.MarkDirty()
+	t.ops.rootSplits[kindIndex(root)].Add(1)
 	copy(lref.Data(), left)
 	copy(rref.Data(), right)
 	copy(root.b, top)

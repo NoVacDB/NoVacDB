@@ -52,8 +52,9 @@ func (m model) verify(t *testing.T, tr *Tree) Stats {
 // the maximum ones, from a small alphabet so prefixes and near-collisions are
 // common.
 type keyGen struct {
-	rng   *rand.Rand
-	large int // percent of keys and values that are maximum size
+	rng    *rand.Rand
+	large  int // percent of keys and values that are maximum size
+	maxLen int // longest ordinary key; 0 means 24
 }
 
 func (g keyGen) key() []byte {
@@ -64,7 +65,11 @@ func (g keyGen) key() []byte {
 		}
 		return k
 	}
-	k := make([]byte, 1+g.rng.IntN(24))
+	n := g.maxLen
+	if n == 0 {
+		n = 24
+	}
+	k := make([]byte, 1+g.rng.IntN(n))
 	for i := range k {
 		k[i] = byte('a' + g.rng.IntN(4))
 	}
@@ -86,7 +91,7 @@ func TestInsertModel(t *testing.T) {
 	}{{8, 0}, {8, 5}, {16, 30}, {64, 2}} {
 		t.Run(fmt.Sprintf("frames=%d,large=%d%%", c.frames, c.large), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(seed, uint64(c.frames*100+c.large)))
-			g := keyGen{rng, c.large}
+			g := keyGen{rng: rng, large: c.large}
 			bp := newPool(t, c.frames)
 			tr, err := Create(bg, bp)
 			if err != nil {

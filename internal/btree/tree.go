@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
 )
@@ -22,6 +23,23 @@ var (
 type Tree struct {
 	bp   *storage.BufferPool
 	root uint64
+	ops  counters
+}
+
+// counters count structural changes, so tests can show which paths they
+// exercised (and, later, for metrics). Index 0 is leaves, 1 internal nodes.
+type counters struct {
+	splits, rootSplits, merges [2]atomic.Uint64
+	redistributions            [2][2]atomic.Uint64 // [kind][0: to the left, 1: to the right]
+	collapses                  atomic.Uint64
+	deletes, latchesAtLeaf     atomic.Uint64 // how much of the path deletes keep latched
+}
+
+func kindIndex(n node) int {
+	if n.isLeaf() {
+		return 0
+	}
+	return 1
 }
 
 // Create creates an empty tree: a root page that is an empty leaf.

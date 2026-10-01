@@ -413,3 +413,16 @@ func (n node) validate() error {
 	}
 	return nil
 }
+
+// appendRaw appends a raw cell copied from a node of the same kind.
+func (n node) appendRaw(cell []byte) error { return n.insertRaw(n.numCells(), cell) }
+
+// insertRaw inserts a raw cell copied from a node of the same kind at i.
+func (n node) insertRaw(i int, cell []byte) error {
+	c, err := n.reserve(i, len(cell))
+	if err != nil {
+		return err
+	}
+	copy(c, cell)
+	return nil
+}
