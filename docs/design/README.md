@@ -9,4 +9,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 
 | Doc | Component | Status |
 |---|---|---|
-| — | No design docs yet. The first one (`01-vfs.md`) arrives with Step 0.2. | — |
+| [01](01-vfs.md) | Virtual file system (`internal/vfs`) | Draft |
