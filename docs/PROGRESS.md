@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 2.1 — WAL writer** (needs design doc `06-wal.md` approved first)
+👉 **Step 2.2 — WAL reader**
 
 ---
 
@@ -22,6 +22,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 1.2 Disk manager | ✅ Done | Dual header slots, free list, atomic Create, poisoned-on-error state. 1500 seeded crash runs, FuzzOpen. |
 | 2026-10-01 | 1.3 Buffer pool | ✅ Done | Clock replacement, PageRef pins and latches, copy-on-flush, WAL-rule hook. Model-based and concurrent tests. |
 | 2026-10-01 | 1.4 Slotted pages and heap | ✅ Done | Slotted page (insert/get/update/delete/compact), heap chain with in-memory FSM, scanner. Model-based, concurrent, crash-at-checkpoint tests; 2 fuzz targets; 16 deliberate-bug checks. |
+| 2026-10-01 | 2.1 WAL writer | ✅ Done | `internal/wal`: record + segment formats, Append/Flush/FlushTo, durable-end tracking, open-time tail recovery, buffer-pool hook (`FlushedLSN`). Found and fixed a durability bug via the crash test's process-kill mode. 20 deliberate-bug checks. |
 
 ---
 
@@ -77,11 +78,11 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Phase 2 — Write-ahead log and recovery
 
-### 👉 Step 2.1 — WAL writer
+### ✅ Step 2.1 — WAL writer
 **Scope:** WAL record format (LSN, length, type, CRC-32C, payload), segment files, append, flush with `fsync`, current and flushed LSN tracking. Design doc `06-wal.md`.
 **Acceptance:** Records round-trip; segment rollover tested; flushed LSN only advances after `Sync`.
 
-### ⬜ Step 2.2 — WAL reader
+### 👉 Step 2.2 — WAL reader
 **Scope:** Sequential reader across segments, detection of torn or corrupt tail records (stop cleanly at the last valid record).
 **Acceptance:** Torn-write crash tests with `MemFS`; fuzz target for record decoding.
 
