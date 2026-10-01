@@ -1,6 +1,6 @@
 # 04 — Buffer Pool (`internal/storage`)
 
-Status: **Draft, awaiting approval**
+Status: **Approved and implemented (Step 1.3)**
 
 ## 1. Problem
 
@@ -129,6 +129,14 @@ Clock approximates LRU with one bit per frame and no list to maintain on every h
 All functions that can do I/O take `ctx` first and check it before starting. Once started, an operation completes. Waiting for the pool mutex is not interruptible.
 
 Sentinel errors: `ErrNoFreeFrames`, `ErrPagePinned`, `ErrAlreadyUnpinned`, `ErrWALRule`, `ErrPoolClosed`, `ErrBadPoolSize`. Store errors are wrapped with `%w`.
+
+### Implementation notes (differences from the first draft)
+
+- `FlushAll` snapshots the IDs of dirty pages and flushes them one at a time through `FlushPage` (pinning one frame at a time) rather than pinning all dirty frames at once, which would starve other callers of frames.
+- `NewPage` rejects page types `Invalid`, `FileHeader` and `Free` up front (the disk manager refuses to write the last two).
+- `Close` marks the pool closed before flushing, so no new pins arrive meanwhile; if the flush fails it reopens the pool so the caller can retry.
+- `FlushPage` must not be called by a goroutine that holds the exclusive latch of that same page (it needs the shared latch).
+- The unpinned-frame invariant `pinCount` is never driven below zero; `Unpin` is guarded per `PageRef`.
 
 ## 3. Formats
 
