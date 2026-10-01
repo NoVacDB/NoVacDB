@@ -1,6 +1,6 @@
 # 02 — Page Format (`internal/storage`)
 
-Status: **Draft, awaiting approval**
+Status: **Approved and implemented (Step 1.1)**
 
 ## 1. Problem
 
