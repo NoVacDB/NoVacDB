@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 0.1 — Project skeleton**
+👉 **Step 0.2 — Virtual file system (`internal/vfs`)** (needs design doc `01-vfs.md` approved first)
 
 ---
 
@@ -16,13 +16,13 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 | Date | Step | Result | Notes |
 |---|---|---|---|
-| — | — | — | — |
+| 2026-10-01 | 0.1 Project skeleton | ✅ Done | Module, `cmd/novacdb`, Makefile, golangci config, CI workflow, `.gitignore`, design index. Full check loop green. |
 
 ---
 
 ## Phase 0 — Bootstrap
 
-### 👉 Step 0.1 — Project skeleton
+### ✅ Step 0.1 — Project skeleton
 **Goal:** A clean, buildable, testable empty project with all tooling in place.
 **Scope:**
 - `go.mod` with the repo's module path, no dependencies
@@ -35,7 +35,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 - `docs/design/README.md` — index of design docs
 **Acceptance:** `make build`, `make test`, `make lint` all pass; `go mod tidy` leaves `go.mod` unchanged; the binary runs and exits cleanly.
 
-### ⬜ Step 0.2 — Virtual file system (`internal/vfs`)
+### 👉 Step 0.2 — Virtual file system (`internal/vfs`)
 **Goal:** Every file operation goes through one interface, so tests can simulate crashes.
 **Scope:**
 - `FS` and `File` interfaces (open, create, read at, write at, sync, truncate, size, close, remove, rename, list, sync directory)
