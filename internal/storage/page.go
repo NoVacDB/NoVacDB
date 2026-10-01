@@ -194,3 +194,10 @@ func Payload(buf []byte) ([]byte, error) {
 	}
 	return buf[HeaderSize:], nil
 }
+
+// PageLSN returns the LSN stored in a page's header. buf must be one page.
+func PageLSN(buf []byte) uint64 { return pageLSN(buf) }
+
+// SetPageLSN stamps a page with the LSN of the last record that changed it,
+// for packages that log their own page formats. buf must be one page.
+func SetPageLSN(buf []byte, lsn uint64) { setPageLSN(buf, lsn) }

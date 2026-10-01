@@ -16,7 +16,9 @@ lint:
 	go vet ./...
 	golangci-lint run
 
-# Runs every Fuzz target for FUZZTIME each. None exist yet.
+# Runs every Fuzz target for FUZZTIME each. Minimising a new input is capped
+# at FUZZMINIMIZE: Go's 60s default stalls fuzzing of page-sized inputs.
+FUZZMINIMIZE ?= 5s
 fuzz:
 	@targets=$$(grep -rl --include='*_test.go' '^func Fuzz' . 2>/dev/null); \
 	if [ -z "$$targets" ]; then echo "fuzz: no fuzz targets yet (first arrive in Step 1.1)"; exit 0; fi; \
@@ -24,7 +26,7 @@ fuzz:
 		dir=$$(dirname $$f); \
 		for t in $$(grep -h '^func Fuzz' $$f | sed 's/func \(Fuzz[A-Za-z0-9_]*\).*/\1/'); do \
 			echo "fuzzing $$dir $$t for $(FUZZTIME)"; \
-			go test $$dir -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) || exit 1; \
+			go test $$dir -run='^$$' -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) -fuzzminimizetime=$(FUZZMINIMIZE) || exit 1; \
 		done; \
 	done
 
