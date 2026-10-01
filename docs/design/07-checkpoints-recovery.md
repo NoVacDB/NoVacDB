@@ -1,6 +1,6 @@
 # 07 — Logging, Checkpoints and Crash Recovery
 
-Status: **Logging implemented in Step 2.3; checkpoints (Step 2.4) and recovery (Step 2.5) designed here and implemented in their steps.** Written and approved under the standing autonomous-mode instruction.
+Status: **Logging implemented in Step 2.3, checkpoints in Step 2.4; recovery (Step 2.5) designed here and implemented in its step.** Written and approved under the standing autonomous-mode instruction.
 
 This document covers the rest of Phase 2, because the three parts depend on each other: what a log record contains (2.3) is decided by what recovery needs (2.5), and what recovery needs is decided by what a checkpoint guarantees (2.4).
 
@@ -82,6 +82,8 @@ A **control file** `control` (section 3) in the database directory records the l
 
 A crash at any point leaves the previous control file in force. Its redo point is still in the log, because segments are deleted only after step 5. Only one checkpoint runs at a time.
 
+**Implementation (Step 2.4):** `wal.Checkpointer` (steps 1–6 above), `WriteControl`/`ReadControl` (temp file, fsync, rename, fsync directory), `Writer.RemoveSegmentsBefore` (oldest first, directory fsynced after each removal, never the segment being written), and `RedoStart`. `RedoStart` finds the replay start: the control file's redo LSN after checking that the checkpoint record it names exists, is a checkpoint record, and carries that redo LSN; or the first record of an untrimmed log when there is no control file. The `Engine` that strings these together with replay comes in Step 2.5; until then, tests assemble the parts by hand.
+
 ### 2.5 Recovery (Step 2.5)
 
 `wal.OpenEngine(ctx, fsys, dir, opts)` opens or creates a database in `dir` (`dir/data`, `dir/wal/`, `dir/control`):
@@ -123,6 +125,8 @@ It does not remember which heaps exist; that is the catalog (Step 4.4). Its call
 `make crashtest` runs both with more iterations.
 
 ### 2.8 Implementation notes (Step 2.3)
+
+- **A page is marked dirty *before* its record is appended (fixed in Step 2.4).** Step 2.3 first marked a changed page dirty only when it was unpinned, after the append. A checkpoint that began in between moved the redo point past the record, but its flush pass did not see the page as dirty and skipped it. Recovery then started after the record, so the change was lost if nothing touched the page again. The concurrent checkpoint-and-crash test found it, failing about once in 50 race-detector runs. Logged operations now call `PageRef.MarkDirty` while holding the exclusive latch, before the append, as PostgreSQL does. Any record below a checkpoint's redo point therefore belongs to a page that is already dirty when the checkpoint snapshots the dirty set. `TestPagesAreDirtyBeforeTheirRecordIsAppended` pins it, and the concurrent test then passed 100 race runs.
 
 - **Bug found and fixed in the pool's flush path.** As first written, `FlushPage` forced the log for the page's LSN, then took a *fresh* copy of the page and checked again. Under concurrent writers the page had changed again by then, and the flush failed with `ErrWALRule`; the concurrent-checkpoint test caught it. The pool now writes the copy it already took, after forcing the log up to *that copy's* LSN. Any later change re-dirties the page, the same copy-time rule as before. There is no retry loop. `TestFlushWhilePageChangesDuringLogForce` reproduces the interleaving deterministically.
 - **The LSN check on operations** (skip if the page's LSN is not below the record's) is never needed in a correct full or from-redo-point replay, because each page's first record after the redo point is an image. It stays as the standard safety net, and is tested directly.
@@ -213,7 +217,17 @@ A block's page ID must be at least 2, two blocks must name different pages, the 
 - **Failure atomicity:** a failing logger (and a failing real writer) makes single- and two-page operations fail with the pages byte-for-byte unchanged and no pins held.
 - Existing unlogged heap and pool tests unchanged.
 
-**Steps 2.4 and 2.5:** in their sections of this document when they are implemented (checkpoint crash points; control file atomicity; segment deletion; redo-only-since-checkpoint counts; the crash harness and OS kill test).
+**Step 2.4 (checkpoints):**
+- Control file codec: round trip, golden bytes, every byte flip detected, invalid fields (size, magic, version, redo after checkpoint), `FuzzDecodeControl`.
+- `WriteControl` atomicity: a fault at each step (create, write, sync, rename, directory sync), with and without an old file, crash with and without a torn write. The control file afterwards always holds exactly the old content or the new.
+- Segment removal: exact boundaries, never the current segment, the log keeps working and reopens; faults on remove and directory sync part way, then a crash. What is left is always a contiguous tail that reads back exactly.
+- **Acceptance:** random logged work across 1 to 4 checkpoints and random segment sizes and pool sizes, then a crash (torn or not). Recovery must start at the last checkpoint's redo point, replay exactly the heap records logged since then, and replay fewer than were ever logged. Old segments must be gone, and every page must equal the pre-crash database.
+- A crash in the middle of a checkpoint (a fault at each of its I/O kinds, at several points, then a torn crash) recovers the same database from the previous checkpoint.
+- A checkpoint makes the next change to an existing page log an image.
+- Checkpoints running concurrently with several writers, then a crash and recovery: identical database (100 race-detector runs).
+- `RedoStart` refuses: a missing checkpoint record, a control file naming a heap record, a redo mismatch, a checkpoint beyond the log, a lost control file after trimming, a damaged control file.
+
+**Step 2.5:** in its section of this document when it is implemented (the engine, the crash harness, the OS kill test).
 
 ## 8. Limitations
 

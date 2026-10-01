@@ -68,6 +68,7 @@ func (h *Heap) newLoggedHeapPage(ctx context.Context) (uint64, error) {
 	}
 	id := ref.ID()
 	ref.Lock()
+	ref.MarkDirty() // NewPage already did; kept explicit for the logging rule
 	before := bytes.Clone(ref.Data())
 	err = InitSlottedPage(ref.Data())
 	var sp *SlottedPage
@@ -103,6 +104,9 @@ func withTwoPages(ctx context.Context, bp *BufferPool, a, b uint64, fn func(spA,
 	}
 	first.Lock()
 	second.Lock()
+	// Dirty before anything can be logged about them (see PageRef.MarkDirty).
+	refA.MarkDirty()
+	refB.MarkDirty()
 	dirty := false
 	spA, err := NewSlottedPage(refA.Data())
 	var spB *SlottedPage
@@ -142,6 +146,8 @@ func (h *Heap) growLogged(ctx context.Context) error {
 	}
 	first.Lock()
 	second.Lock()
+	ref.MarkDirty() // before the grow record exists (see PageRef.MarkDirty)
+	tref.MarkDirty()
 	err = func() error {
 		newBefore := bytes.Clone(ref.Data())
 		tailBefore := bytes.Clone(tref.Data())

@@ -55,13 +55,19 @@ type Heap struct {
 // withPage pins page id, latches it (exclusively if write), and runs fn on it
 // as a slotted page. fn reports whether it changed the page. Latch and pin
 // are always released, in that order.
-func withPage(ctx context.Context, bp *BufferPool, id uint64, write bool, fn func(*SlottedPage) (bool, error)) error {
+//
+// If markDirty is true (write must be too), the page is marked dirty as soon
+// as it is latched, before fn can log a change to it; see PageRef.MarkDirty.
+func withPage(ctx context.Context, bp *BufferPool, id uint64, write, markDirty bool, fn func(*SlottedPage) (bool, error)) error {
 	ref, err := bp.FetchPage(ctx, id)
 	if err != nil {
 		return err
 	}
 	if write {
 		ref.Lock()
+		if markDirty {
+			ref.MarkDirty()
+		}
 	} else {
 		ref.RLock()
 	}
@@ -147,7 +153,7 @@ func OpenHeap(ctx context.Context, bp *BufferPool, first uint64, opts ...HeapOpt
 		}
 		var next uint64
 		var free int
-		err := withPage(ctx, bp, id, false, func(sp *SlottedPage) (bool, error) {
+		err := withPage(ctx, bp, id, false, false, func(sp *SlottedPage) (bool, error) {
 			if err := sp.Validate(); err != nil {
 				return false, err
 			}
@@ -228,7 +234,7 @@ func (h *Heap) grow(ctx context.Context, size int) error {
 	h.mu.Unlock()
 	// Link only after the new page exists, so a chain never points at
 	// nothing (crash atomicity proper needs the WAL).
-	err = withPage(ctx, h.bp, tail, true, func(sp *SlottedPage) (bool, error) {
+	err = withPage(ctx, h.bp, tail, true, false, func(sp *SlottedPage) (bool, error) {
 		sp.SetNextPage(newID)
 		return true, nil
 	})
@@ -257,7 +263,7 @@ func (h *Heap) Insert(ctx context.Context, data []byte) (RID, error) {
 			continue
 		}
 		var slot int
-		err := withPage(ctx, h.bp, id, true, func(sp *SlottedPage) (bool, error) {
+		err := withPage(ctx, h.bp, id, true, h.lg != nil, func(sp *SlottedPage) (bool, error) {
 			before := h.snapshot(sp)
 			s, err := sp.Insert(data)
 			h.setFree(id, sp.FreeSpace()) // refresh the hint whatever happened
@@ -289,7 +295,7 @@ func (h *Heap) Get(ctx context.Context, rid RID) ([]byte, error) {
 		return nil, err
 	}
 	var out []byte
-	err := withPage(ctx, h.bp, rid.Page, false, func(sp *SlottedPage) (bool, error) {
+	err := withPage(ctx, h.bp, rid.Page, false, false, func(sp *SlottedPage) (bool, error) {
 		d, err := sp.Get(int(rid.Slot))
 		if err != nil {
 			return false, err
@@ -308,7 +314,7 @@ func (h *Heap) Delete(ctx context.Context, rid RID) error {
 	if err := h.checkRID(rid); err != nil {
 		return err
 	}
-	err := withPage(ctx, h.bp, rid.Page, true, func(sp *SlottedPage) (bool, error) {
+	err := withPage(ctx, h.bp, rid.Page, true, h.lg != nil, func(sp *SlottedPage) (bool, error) {
 		before := h.snapshot(sp)
 		if err := sp.Delete(int(rid.Slot)); err != nil {
 			return false, err
@@ -337,7 +343,7 @@ func (h *Heap) Update(ctx context.Context, rid RID, data []byte) (RID, error) {
 	if err := h.checkRID(rid); err != nil {
 		return RID{}, err
 	}
-	err := withPage(ctx, h.bp, rid.Page, true, func(sp *SlottedPage) (bool, error) {
+	err := withPage(ctx, h.bp, rid.Page, true, h.lg != nil, func(sp *SlottedPage) (bool, error) {
 		before := h.snapshot(sp)
 		err := sp.Update(int(rid.Slot), data)
 		if err == nil || errors.Is(err, ErrNoSpace) {
@@ -396,7 +402,7 @@ func (s *Scanner) Next(ctx context.Context) (rid RID, data []byte, ok bool, err 
 	for s.page != 0 {
 		var found bool
 		var next uint64
-		err = withPage(ctx, s.h.bp, s.page, false, func(sp *SlottedPage) (bool, error) {
+		err = withPage(ctx, s.h.bp, s.page, false, false, func(sp *SlottedPage) (bool, error) {
 			slot := sp.NextLive(s.slot)
 			if slot < 0 {
 				next = sp.NextPage()

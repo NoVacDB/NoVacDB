@@ -371,6 +371,41 @@ func (w *Writer) writeChunks(chunks []chunk) error {
 	return nil
 }
 
+// RemoveSegmentsBefore deletes the oldest segments whose records all lie
+// below lsn (a segment is removed only if it ends at or before lsn), never the
+// segment being written. Segments are removed oldest first, fsyncing the
+// directory after each, so a crash part way leaves the log a contiguous suffix
+// of what it was. It returns how many were removed.
+func (w *Writer) RemoveSegmentsBefore(ctx context.Context, lsn LSN) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := w.checkOpen(); err != nil {
+		return 0, err
+	}
+	// flushMu keeps a flush from creating or switching segments meanwhile.
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+	segs, _, err := scanSegments(w.fsys, w.dir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, s := range segs {
+		if s.end() > lsn || uint64(s.start) >= w.fStart {
+			break
+		}
+		if err := w.fsys.Remove(segPath(w.dir, s.start)); err != nil {
+			return removed, fmt.Errorf("removing segment %s: %w", SegmentName(s.start), err)
+		}
+		if err := w.fsys.SyncDir(w.dir); err != nil {
+			return removed, fmt.Errorf("syncing wal directory: %w", err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 // Close flushes everything buffered and closes the log. A writer that has
 // failed is closed without flushing and reports ErrFailed.
 func (w *Writer) Close(ctx context.Context) error {

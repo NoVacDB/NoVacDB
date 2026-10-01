@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 2.4 — Checkpoints** (design in `07-checkpoints-recovery.md`)
+👉 **Step 2.5 — Crash recovery and crash test harness** (design in `07-checkpoints-recovery.md`)
 
 ---
 
@@ -25,6 +25,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 2.1 WAL writer | ✅ Done | `internal/wal`: record + segment formats, Append/Flush/FlushTo, durable-end tracking, open-time tail recovery, buffer-pool hook (`FlushedLSN`). Found and fixed a durability bug via the crash test's process-kill mode. 20 deliberate-bug checks. |
 | 2026-10-01 | 2.2 WAL reader | ✅ Done | Sequential reader across segments sharing recovery's validation; torn tail = clean end, earlier damage = ErrCorrupt; boundary-checked start; FuzzReader; crash harness cross-checks reader vs recovery. |
 | 2026-10-01 | 2.3 Logging heap changes | ✅ Done | One physiological record per heap operation (two-page moves and grows atomic), full-page image on first change after the redo point, redo function, pool FlushWAL hook + PinForOverwrite, wal.Logger. Found and fixed a flush-path race. 11 deliberate-bug checks. |
+| 2026-10-01 | 2.4 Checkpoints | ✅ Done | Checkpointer (redo point, flush, sync, record, atomic control file, segment trimming), RedoStart. Found and fixed a lost-update race from 2.3 (pages now dirty before their record is appended). 10 deliberate-bug checks. |
 
 ---
 
@@ -92,11 +93,11 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 **Scope:** Every heap change writes a WAL record first; pages carry the LSN of their last change; buffer pool enforces the WAL rule before evicting or flushing a page.
 **Acceptance:** Tests prove no page reaches disk before its WAL record is durable.
 
-### 👉 Step 2.4 — Checkpoints
+### ✅ Step 2.4 — Checkpoints
 **Scope:** Checkpoint record, flushing dirty pages, recording the redo start point, old WAL segment cleanup. Design doc `07-checkpoints-recovery.md`.
 **Acceptance:** Recovery after a checkpoint replays only what is needed; old segments removed safely.
 
-### ⬜ Step 2.5 — Crash recovery and crash test harness
+### 👉 Step 2.5 — Crash recovery and crash test harness
 **Scope:** Redo recovery on startup. Crash test harness in `tests/crash/`: random operations, crash at random points with `MemFS`, recover, verify every acknowledged change is present and nothing partial is visible. Also an OS-level script that kills the real process. `make crashtest` wired up.
 **Acceptance:** Thousands of seeded crash runs pass; failing seeds are reproducible.
 

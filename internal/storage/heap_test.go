@@ -99,7 +99,7 @@ func (h *Heap) checkFSM(t testing.TB) {
 		if idx[p.id] != i {
 			t.Fatalf("index[%d] = %d, want %d", p.id, idx[p.id], i)
 		}
-		err := withPage(bg, h.bp, p.id, false, func(sp *SlottedPage) (bool, error) {
+		err := withPage(bg, h.bp, p.id, false, false, func(sp *SlottedPage) (bool, error) {
 			if err := sp.Validate(); err != nil {
 				return false, err
 			}

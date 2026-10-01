@@ -956,3 +956,72 @@ func TestTwoPageLatchesNeverDeadlock(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// dirtyCheckLogger runs a check right after each record is appended, while the
+// heap still holds the page latched: the moment a checkpoint could begin.
+type dirtyCheckLogger struct {
+	*fakeLogger
+	after func()
+}
+
+func (l *dirtyCheckLogger) Log(ctx context.Context, build func(uint64) []byte) (uint64, error) {
+	lsn, err := l.fakeLogger.Log(ctx, build)
+	if err == nil && l.after != nil {
+		l.after()
+	}
+	return lsn, err
+}
+
+// Every page a logged operation changes must already be marked dirty when its
+// record is appended. Otherwise a checkpoint beginning right then would not
+// flush the page, recovery would start after the record, and the change would
+// be lost. (Found by TestCheckpointsDuringConcurrentWorkThenCrash in the wal
+// package; this pins it down deterministically.)
+func TestPagesAreDirtyBeforeTheirRecordIsAppended(t *testing.T) {
+	e := newLoggedEnv(t, 8)
+	lg := &dirtyCheckLogger{fakeLogger: e.lg}
+	h, err := CreateHeap(bg, e.bp, WithLogger(lg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, err := h.Insert(bg, []byte("row"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler, err := h.Insert(bg, bytes.Repeat([]byte{1}, h.pages[0].free-slotSize-10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	lg.after = func() {
+		recs := e.lg.records()
+		blocks, _ := DecodeHeapRecord(recs[len(recs)-1].payload)
+		e.bp.mu.Lock()
+		defer e.bp.mu.Unlock()
+		for _, b := range blocks {
+			if f, ok := e.bp.table[b.Page]; !ok || !f.dirty.Load() {
+				t.Errorf("page %d is not marked dirty when its record (kind %d) is appended", b.Page, b.Kind)
+			}
+		}
+		checks++
+	}
+	ops := []func() error{
+		func() error { _, err := h.Insert(bg, []byte("x")); return err },
+		func() error { _, err := h.Update(bg, rid, []byte("same size!")); return err },
+		func() error { _, err := h.Update(bg, rid, bytes.Repeat([]byte{2}, 3000)); return err }, // moves (grows first)
+		func() error { return h.Delete(bg, filler) },
+		func() error { _, err := CreateHeap(bg, e.bp, WithLogger(lg)); return err },
+	}
+	for i, op := range ops {
+		// Start every operation from clean pages, as after a checkpoint.
+		if err := e.bp.FlushAll(bg); err != nil {
+			t.Fatal(err)
+		}
+		if err := op(); err != nil {
+			t.Fatalf("op %d: %v", i, err)
+		}
+	}
+	if checks < len(ops) {
+		t.Fatalf("only %d records checked", checks)
+	}
+}

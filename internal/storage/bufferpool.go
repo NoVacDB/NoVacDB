@@ -149,6 +149,13 @@ func (r *PageRef) RLock() { r.f.latch.RLock() }
 // RUnlock releases the shared content latch.
 func (r *PageRef) RUnlock() { r.f.latch.RUnlock() }
 
+// MarkDirty marks the page dirty at once, without waiting for Unpin. A logged
+// change must do this, under the exclusive latch, before its log record is
+// appended: a checkpoint that starts after the append then finds the page
+// dirty and writes it. (Marking it only at Unpin leaves a window in which the
+// checkpoint misses the page while recovery skips the record.)
+func (r *PageRef) MarkDirty() { r.f.dirty.Store(true) }
+
 // Unpin releases the pin. Pass dirty=true if the page was modified. A second
 // Unpin of the same PageRef returns ErrAlreadyUnpinned and changes nothing.
 func (r *PageRef) Unpin(dirty bool) error {
