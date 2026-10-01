@@ -1,6 +1,6 @@
-# 06 — WAL Writer (`internal/wal`)
+# 06 — WAL Writer and Reader (`internal/wal`)
 
-Status: **Implemented (Step 2.1); written and approved under the standing autonomous-mode instruction**
+Status: **Writer implemented in Step 2.1, reader in Step 2.2; written and approved under the standing autonomous-mode instruction**
 
 ## 1. Problem
 
@@ -72,6 +72,25 @@ sequenceDiagram
 Step 7 and the fsync in step 6 exist because a *killed process* is not a *power cut*. After a kill the operating system still holds everything it was given, synced or not, and shows it to the next `Open`; a later power cut would then take back whatever was never fsynced, including segment files whose directory entries were never synced. `Open` reports what it found as durable, so it must make that true. (A flush that dies after creating several segments leaves exactly such files. This was found by the crash test's process-kill mode, and `TestOpenMakesSegmentEntriesDurable` pins it.) Segment contents need no extra sync: each segment is fsynced before the next one is created.
 
 Scanning stops at the first bad record, as PostgreSQL does, rather than refusing to start. After a power cut, writeback can have persisted later pages of an unsynced tail without earlier ones, so valid-looking records after a hole are normal and were never acknowledged. The cost: bit rot in an acknowledged record in the middle of the last segment makes everything after it disappear silently. Detecting that is recovery's job (Step 2.2 reports a checksum failure that is followed by valid records), and it is listed under Limitations.
+
+### Reader (Step 2.2)
+
+`NewReader(fsys, dir, from)` reads records sequentially from `from` to the end of the log, across segments. It shares the directory scan with the writer's `Open` (`scanSegments`: header checks, start-LSN-matches-name, contiguity, leftover detection) and the per-segment record walk (`scanRecords`), so **the reader and recovery agree by construction** about where the log ends.
+
+- `from` must be the LSN of a record, the start of a segment, or the end of the log. The reader proves it by walking the segment's records up to it; anything else (inside a record or a header, before the oldest segment, past the end) is `ErrLSNNotFound`. A redo start point that is not in the log means log has been lost, and must not be skipped silently.
+- In every segment except the last, records must be complete, valid, at their own LSN, and fill the file exactly; otherwise `ErrCorrupt`. In the last segment the first bad record is the end of the log (`io.EOF`), exactly as the writer's `Open` decides, and `End()` reports where that is.
+- The reader never modifies anything and ignores a leftover last segment that cannot hold records.
+- It reads one segment into memory at a time; payloads stay valid after later calls.
+- `FirstLSN(fsys, dir)` returns the first record position of the oldest remaining segment, where a full replay starts.
+
+API:
+
+```go
+func NewReader(fsys vfs.FS, dir string, from LSN) (*Reader, error)
+func (r *Reader) Next() (Record, error) // io.EOF at the end; ErrCorrupt for damage before the last segment
+func (r *Reader) End() LSN
+func FirstLSN(fsys vfs.FS, dir string) (LSN, error)
+```
 
 ### Failure handling
 
@@ -178,14 +197,15 @@ A record's size is `20 + PayloadLen`; the next record starts right after it. Fil
 - **Open / recovery:** clean reopen continues at the same `EndLSN`, repeated for many cycles; reopen after a torn tail (via `MemFS` tear and by hand-truncating at every possible byte of the last record) cuts at the last good record and appending continues correctly; garbage after the last record; leftover new-segment files of length 0, 1, 31, 32 with invalid/valid header; non-trivial invalid header → `ErrCorrupt`; gap between segments, overlap, wrong start in header, wrong magic/version → errors; an unrelated file in the directory is ignored; truncated middle segment → `ErrCorrupt`.
 - **Crash tests (`MemFS`, thousands of seeded runs):** random mixes of `Append`, `Flush`, `FlushTo` with random payload sizes and small segments, random injected I/O errors (write, sync, create, sync-dir, remove), three kinds of death (torn power cut, plain power cut, killed process whose unsynced bytes stay visible), reopen, then verify: `Open` succeeds; the recovered log is **a prefix of the appended sequence** (records identical, in order, no extras); it contains **every record acknowledged by a successful flush**; appending after recovery works and survives another crash/reopen. Failing seeds reproduce (`NOVACDB_SEED`).
 - **Concurrency (`-race`, `-count=20`):** many goroutines appending and flushing; each acknowledged record survives a crash at the end; per-goroutine order preserved; all LSNs unique and consistent; a concurrent mix with the auto-flush threshold.
-- **Fuzz:** `FuzzDecodeRecord`, `FuzzDecodeSegmentHeader`, `FuzzOpen` (arbitrary bytes as a last segment: never panics, errors cleanly or yields a log that accepts appends and reopens identically).
+- **Reader (Step 2.2):** whole-log reads across 1-byte, small and default segments; starting at every record and every segment start; rejecting positions inside records, inside headers, past the end, before the oldest segment; torn tail at every byte; zero runs, garbage and stale valid-checksum records in the last segment; corruption in a non-last segment is `ErrCorrupt` (sticky), including when seeking through it; truncated middle segment; leftover segment ignored; live log. The crash harness reads every crashed log with the reader **before** recovery and requires exactly the records recovery then keeps.
+- **Fuzz:** `FuzzDecodeRecord`, `FuzzDecodeSegmentHeader`, `FuzzOpen`, `FuzzReader` (two arbitrary segment files; no panic, records sit at their own LSN, and recovery keeps exactly what the reader returned) (arbitrary bytes as a last segment: never panics, errors cleanly or yields a log that accepts appends and reopens identically).
 - **Benchmarks:** append throughput, flush with small and large batches.
 - Coverage target at least 80%.
 
 ## 8. Limitations
 
-- Writer only: no public sequential reader and no replay (Steps 2.2–2.5). Open scans only the last segment, trusting earlier ones by the completeness invariant plus header and contiguity checks.
-- Bit rot in an acknowledged record inside the last segment is indistinguishable from a torn tail and silently discards the records after it (later recovery code reports it when it finds valid records after a bad one).
+- `Open` scans only the last segment, trusting earlier ones by the completeness invariant plus header and contiguity checks; the reader verifies earlier segments' records when it reads them (recovery, Step 2.5). There is no replay in this package yet.
+- Bit rot in an acknowledged record inside the last segment is indistinguishable from a torn tail and discards the records after it. The reader treats it the same way, by design, so recovery and the writer never disagree.
 - No old-segment removal or recycling yet (Step 2.4).
 - One fsync per flush; no batching delay or flush thread.
 - No cross-process lock; one writer per directory.

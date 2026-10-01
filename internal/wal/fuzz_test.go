@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
@@ -118,6 +119,79 @@ func FuzzOpen(f *testing.F) {
 		recs, _ := readLog(t, fsys, testDir)
 		if len(recs) == 0 || recs[len(recs)-1].LSN != lsn || string(recs[len(recs)-1].Payload) != "fuzz" {
 			t.Fatalf("appended record missing from the log: %v", recs)
+		}
+	})
+}
+
+// FuzzReader: arbitrary bytes as the content of two consecutive segments.
+// The reader must never panic, must only return records that sit exactly at
+// their own LSN, and must agree with what the writer's recovery keeps.
+func FuzzReader(f *testing.F) {
+	m := vfs.NewMemFS(1)
+	_ = m.MkdirAll("/db")
+	_ = m.SyncDir("/")
+	w, err := Open(m, testDir, Options{SegmentSize: 120})
+	if err != nil {
+		f.Fatal(err)
+	}
+	for i := range 6 {
+		if _, err := w.Append(bg, RecordType(i+1), bytes.Repeat([]byte{byte(i)}, 5+7*i)); err != nil {
+			f.Fatal(err)
+		}
+	}
+	if err := w.Close(bg); err != nil {
+		f.Fatal(err)
+	}
+	names, _ := m.List(testDir)
+	seg0 := readFile(f, m, testDir+"/"+names[0])
+	seg1 := readFile(f, m, testDir+"/"+names[1])
+	f.Add(seg0, seg1)
+	f.Add(seg0, []byte{})
+	f.Add(seg0[:len(seg0)-1], seg1)
+	f.Add(seg0, seg1[:40])
+	f.Add([]byte{}, []byte{})
+
+	f.Fuzz(func(t *testing.T, a, b []byte) {
+		fsys := newFS(t)
+		writeFile(t, fsys, testDir+"/"+SegmentName(0), a)
+		if len(b) > 0 {
+			writeFile(t, fsys, testDir+"/"+SegmentName(LSN(len(a))), b)
+		}
+		r, err := NewReader(fsys, testDir, 0)
+		if err != nil {
+			return
+		}
+		var got []Record
+		var prevEnd LSN
+		for {
+			rec, err := r.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				if !errors.Is(err, ErrCorrupt) {
+					t.Fatalf("unclassified error %v", err)
+				}
+				return
+			}
+			if prevEnd != 0 && rec.LSN < prevEnd {
+				t.Fatalf("record %d overlaps the previous one ending at %d", rec.LSN, prevEnd)
+			}
+			prevEnd = rec.LSN + LSN(RecordSize(len(rec.Payload)))
+			got = append(got, rec)
+		}
+		// Recovery must keep exactly what the reader returned.
+		w, err := Open(fsys, testDir, Options{})
+		if err != nil {
+			t.Fatalf("reader accepted a log that Open rejects: %v", err)
+		}
+		if w.EndLSN() != r.End() && len(got) > 0 {
+			t.Fatalf("reader ended at %d, recovery at %d", r.End(), w.EndLSN())
+		}
+		_ = w.Close(bg)
+		kept, _ := readLog(t, fsys, testDir)
+		if len(kept) != len(got) {
+			t.Fatalf("reader returned %d records, recovery kept %d", len(got), len(kept))
 		}
 	})
 }

@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"path"
-	"slices"
 	"sync"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
@@ -105,11 +103,6 @@ func Open(fsys vfs.FS, dir string, opts Options) (*Writer, error) {
 	return w, nil
 }
 
-type segInfo struct {
-	start LSN
-	size  int64
-}
-
 func (w *Writer) open() error {
 	if err := w.fsys.MkdirAll(w.dir); err != nil {
 		return err
@@ -117,95 +110,33 @@ func (w *Writer) open() error {
 	if err := w.fsys.SyncDir(path.Dir(w.dir)); err != nil {
 		return err
 	}
-	names, err := w.fsys.List(w.dir)
+	segs, residue, err := scanSegments(w.fsys, w.dir)
 	if err != nil {
 		return err
 	}
-	var starts []LSN
-	for _, n := range names {
-		if s, ok := ParseSegmentName(n); ok {
-			starts = append(starts, s)
-		}
-	}
-	slices.Sort(starts)
-	if len(starts) == 0 {
-		return w.startFresh(0)
-	}
-
-	// Validate every segment's header and the chain between segments.
-	infos := make([]segInfo, 0, len(starts))
-	for i, s := range starts {
-		last := i == len(starts)-1
-		size, err := w.checkSegment(s, last)
-		if errors.Is(err, errResidue) {
-			// A crash while creating the final segment; it holds no records.
-			if rerr := w.fsys.Remove(segPath(w.dir, s)); rerr != nil {
-				return rerr
-			}
-			if serr := w.fsys.SyncDir(w.dir); serr != nil {
-				return serr
-			}
-			if len(infos) == 0 {
-				if s != 0 {
-					return fmt.Errorf("only segment %s is unusable: %w", SegmentName(s), ErrCorrupt)
-				}
-				return w.startFresh(0)
-			}
-			break
-		}
-		if err != nil {
+	if residue != nil {
+		// A crash while creating the final segment; it holds no records.
+		// Everything else has been validated, so it is safe to discard.
+		if err := w.fsys.Remove(segPath(w.dir, *residue)); err != nil {
 			return err
 		}
-		infos = append(infos, segInfo{start: s, size: size})
-	}
-	for i := 1; i < len(infos); i++ {
-		prev := infos[i-1]
-		if want := uint64(prev.start) + uint64(prev.size); uint64(infos[i].start) != want {
-			return fmt.Errorf("segment %s starts at %d but the previous one ends at %d: %w",
-				SegmentName(infos[i].start), infos[i].start, want, ErrCorrupt)
+		if err := w.fsys.SyncDir(w.dir); err != nil {
+			return err
 		}
 	}
-	if err := w.recoverLast(infos[len(infos)-1]); err != nil {
+	if len(segs) == 0 {
+		if residue != nil && *residue != 0 {
+			return fmt.Errorf("only segment %s is unusable: %w", SegmentName(*residue), ErrCorrupt)
+		}
+		return w.startFresh(0)
+	}
+	if err := w.recoverLast(segs[len(segs)-1]); err != nil {
 		return err
 	}
 	// After a killed process (as opposed to a power cut) the file system can
 	// show files whose directory entries were never fsynced. Open reports
 	// everything it found as durable, so make the entries durable too.
 	return w.fsys.SyncDir(w.dir)
-}
-
-// errResidue marks a final segment that is only the debris of a crash during
-// its creation.
-var errResidue = errors.New("wal: residue")
-
-// checkSegment validates the header of the segment starting at s and returns
-// its file size.
-func (w *Writer) checkSegment(s LSN, last bool) (int64, error) {
-	f, err := w.fsys.OpenFile(segPath(w.dir, s), vfs.ORead)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = f.Close() }()
-	size, err := f.Size()
-	if err != nil {
-		return 0, err
-	}
-	hdr := make([]byte, SegmentHeaderSize)
-	n, err := f.ReadAt(hdr, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return 0, err
-	}
-	start, derr := DecodeSegmentHeader(hdr[:n])
-	if derr != nil {
-		if last && size <= SegmentHeaderSize && errors.Is(derr, ErrCorrupt) {
-			return 0, errResidue // cannot contain records, safe to discard
-		}
-		return 0, fmt.Errorf("segment %s: %w", SegmentName(s), derr)
-	}
-	if start != s {
-		return 0, fmt.Errorf("segment %s: header says it starts at %d: %w", SegmentName(s), start, ErrCorrupt)
-	}
-	return size, nil
 }
 
 // startFresh creates the very first segment of an empty log.
@@ -239,21 +170,13 @@ func (w *Writer) recoverLast(seg segInfo) error {
 		return err
 	}
 	w.f = f
-	data := make([]byte, seg.size)
-	n, err := f.ReadAt(data, 0)
-	if err != nil && !errors.Is(err, io.EOF) {
+	data, err := readSegment(w.fsys, w.dir, seg)
+	if err != nil {
 		return err
 	}
-	data = data[:n]
-
-	off := SegmentHeaderSize
-	for off < len(data) {
-		rec, size, derr := DecodeRecord(data[off:])
-		if derr != nil || uint64(rec.LSN) != uint64(seg.start)+uint64(off) {
-			break // torn tail, or bytes that do not belong at this position
-		}
-		off += size
-	}
+	// Everything after the last good record is a torn tail, or bytes that do
+	// not belong at their position.
+	off := scanRecords(data, seg.start)
 	if off < len(data) {
 		if err := f.Truncate(int64(off)); err != nil {
 			return err

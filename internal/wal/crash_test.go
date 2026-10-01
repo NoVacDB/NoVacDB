@@ -1,8 +1,10 @@
 package wal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"sync"
@@ -128,12 +130,38 @@ func runCrashScenario(t *testing.T, seed uint64) (st crashStats) {
 			m.Crash(vfs.CrashOptions{TearLast: true})
 		}
 
+		// Before the writer repairs anything, the reader must already see
+		// exactly the log recovery will keep.
+		var preRead []logRec
+		if r, rerr := NewReader(m, testDir, 0); rerr == nil {
+			for {
+				rec, err := r.Next()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					fail("cycle %d: reader before recovery: %v", cycle, err)
+				}
+				preRead = append(preRead, logRec{rec.LSN, rec.Type, bytes.Clone(rec.Payload)})
+			}
+		} else if !errors.Is(rerr, ErrLSNNotFound) {
+			fail("cycle %d: NewReader before recovery: %v", cycle, rerr)
+		}
+
 		w, err = Open(m, testDir, opts)
 		if err != nil {
 			fail("cycle %d: Open after crash: %v", cycle, err)
 		}
 		got, segs := readLog(t, m, testDir)
 		trace("cycle %d: recovered %d records, EndLSN %d", cycle, len(got), w.EndLSN())
+		if len(preRead) != len(got) {
+			fail("cycle %d: reader saw %d records before recovery, recovery kept %d", cycle, len(preRead), len(got))
+		}
+		for i := range got {
+			if preRead[i].LSN != got[i].LSN || string(preRead[i].Payload) != string(got[i].Payload) {
+				fail("cycle %d: reader and recovery disagree at record %d", cycle, i)
+			}
+		}
 		if len(got) < acked || len(got) > len(appended) {
 			fail("cycle %d: recovered %d records; %d were acknowledged and %d appended", cycle, len(got), acked, len(appended))
 		}
