@@ -1,6 +1,6 @@
 # 08 — B+Tree Indexes (`internal/btree`)
 
-Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2.** Written and approved under the standing autonomous-mode instruction.
 
 The whole phase is designed in one document because its parts constrain each other: how splits and merges are done (3.2, 3.3) is dictated by how they must be latched and logged (3.5).
 
@@ -74,6 +74,8 @@ flowchart TD
 - Splitting before descending means a split never propagates upward. A writer only ever holds two latches (parent and child, three pages when one is new), and the tree is consistent after every split.
 - A node is split at the first cell where the left part holds at least half of the node's bytes. For a leaf the separator is the right half's first key; for an internal node it is the middle key, which moves up and becomes the new node's `Child0` boundary.
 - `Insert` of an existing key fails with `ErrKeyExists`, after checking at the leaf; any splits made on the way down are kept, which is harmless.
+- A split first builds the new contents of every page it changes in scratch buffers and only then copies them in, so a split that fails (no free frame for the new page, a corrupt node) changes nothing; in an unlogged tree the pages it allocated are freed again.
+- A split can leave the right half underfull when one large cell dominates the node (the left half takes at least half of the bytes). Underflow is soft (2.8), so this is allowed and reported by `Check`.
 
 ### 2.5 Delete: latch crabbing, repair bottom-up (Step 3.3)
 

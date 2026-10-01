@@ -31,6 +31,13 @@ func testSeed(t testing.TB) uint64 {
 // newPool returns a buffer pool of frames frames over a fresh data file.
 func newPool(t testing.TB, frames int) *storage.BufferPool {
 	t.Helper()
+	bp, _ := newPoolDM(t, frames)
+	return bp
+}
+
+// newPoolDM is newPool that also returns the data file.
+func newPoolDM(t testing.TB, frames int) (*storage.BufferPool, *storage.DiskManager) {
+	t.Helper()
 	m := vfs.NewMemFS(1)
 	dm, err := storage.Create(m, "/data")
 	if err != nil {
@@ -41,5 +48,5 @@ func newPool(t testing.TB, frames int) *storage.BufferPool {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = dm.Close() })
-	return bp
+	return bp, dm
 }
