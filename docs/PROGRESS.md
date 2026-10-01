@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 1.2 — Disk manager** (needs design doc `03-disk-manager.md` approved first)
+👉 **Step 1.3 — Buffer pool** (needs design doc `04-buffer-pool.md` approved first)
 
 ---
 
@@ -19,6 +19,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 0.1 Project skeleton | ✅ Done | Module, `cmd/novacdb`, Makefile, golangci config, CI workflow, `.gitignore`, design index. Full check loop green. |
 | 2026-10-01 | 0.2 Virtual file system | ✅ Done | `internal/vfs`: OSFS, MemFS with durable/volatile model, Crash with torn last write, fault injection. Coverage 97.2%. |
 | 2026-10-01 | 1.1 Page format | ✅ Done | `internal/storage`: 8 KiB page, 24-byte header, CRC-32C Seal/Verify, 2 fuzz targets. Coverage 100%. |
+| 2026-10-01 | 1.2 Disk manager | ✅ Done | Dual header slots, free list, atomic Create, poisoned-on-error state. 1500 seeded crash runs, FuzzOpen. |
 
 ---
 
@@ -55,12 +56,12 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 **Scope:** Page header (page ID, LSN, CRC-32C, page type, flags), encode/decode, checksum compute and verify, page type constants. Design doc `02-page-format.md`.
 **Acceptance:** Round-trip tests; corrupted bytes detected; fuzz target for the decoder runs 30s without failures.
 
-### 👉 Step 1.2 — Disk manager
+### ✅ Step 1.2 — Disk manager
 **Goal:** Read, write, and allocate pages in a data file.
 **Scope:** File header page (magic number, format version, page size), allocate/free pages with a free list, read/write by page ID via `vfs`, durable `Sync`. Design doc `03-disk-manager.md`.
 **Acceptance:** Pages survive reopen; freed pages are reused; corrupt or wrong-version files are rejected with clear errors; crash tests with `MemFS` show no corruption of synced data.
 
-### ⬜ Step 1.3 — Buffer pool
+### 👉 Step 1.3 — Buffer pool
 **Goal:** Keep hot pages in memory.
 **Scope:** Fixed number of frames, page table, pin/unpin with pin counts, dirty tracking, Clock replacement, flush one / flush all, concurrency-safe. A hook (`flushedLSN` function) so the WAL rule can be enforced later. Design doc `04-buffer-pool.md`.
 **Acceptance:** Model-based tests; concurrent pin/unpin under `-race` with `-count=20`; error when all frames are pinned; eviction writes dirty pages.

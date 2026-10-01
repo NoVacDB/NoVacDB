@@ -1,6 +1,6 @@
 # 03 — Disk Manager (`internal/storage`)
 
-Status: **Draft, awaiting approval**
+Status: **Approved and implemented (Step 1.2)**
 
 ## 1. Problem
 
@@ -63,7 +63,7 @@ The header slot is a normal page (type `PageTypeFileHeader`, page ID = slot numb
 Creation must be atomic, or a crash could leave a half-made file that neither `Create` nor `Open` accepts:
 
 1. Remove any stale `name.tmp` from an earlier crashed attempt.
-2. Create `name.tmp` (`OCreate|OExcl`), write slot 0 (generation 1, 2 pages, empty free list) and a zeroed slot 1.
+2. Create `name.tmp` (`OCreate|OExcl`), write slot 0 (generation 0, 2 pages, empty free list) and a zeroed slot 1.
 3. `File.Sync`, `Close`, `Rename(name.tmp, name)`, then `SyncDir` on the parent directory.
 
 After a crash, either `name` does not exist (retry `Create`) or it is complete. `Create` first checks that `name` does not exist.
@@ -107,6 +107,15 @@ Order matters: the free page is durable *before* the header points at it, so the
 ### Poisoned state
 
 If any I/O step of `Allocate`, `Free` or `Sync` fails, memory and disk may disagree and a failed `fsync` may have dropped data. The manager marks itself **failed** and every later call returns `ErrFailed` until the file is reopened (which re-reads the durable state). It never retries an `fsync` and assumes success.
+
+### Implementation notes (differences from the first draft)
+
+- The initial header is **generation 0** in slot 0 (slot = generation % 2), so the first header commit has generation 1 and lands in slot 1.
+- A header slot must satisfy `generation % 2 == slot`; otherwise it is treated as damaged.
+- `Close` on a failed manager skips the final sync and just closes the file.
+- Errors: `ErrInvalidPageID`, `ErrCorrupt`, `ErrBadMagic`, `ErrUnsupportedVersion`, `ErrPageSizeMismatch`, `ErrDoubleFree`, `ErrDiskClosed`, `ErrFailed`, `ErrFull`.
+- `WritePage` also rejects pages of type `FileHeader` and `Free` (managed by the disk manager itself).
+- A page allocated from the free list whose zeroing write was lost in a crash may still hold its old `Free` image, or a torn mix of it; callers must write a page before reading it. `Free` of such a torn page returns `ErrChecksum` rather than hiding the damage.
 
 ## 3. Formats
 
