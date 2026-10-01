@@ -156,6 +156,10 @@ func (r *PageRef) RUnlock() { r.f.latch.RUnlock() }
 // checkpoint misses the page while recovery skips the record.)
 func (r *PageRef) MarkDirty() { r.f.dirty.Store(true) }
 
+// Dirty reports whether the page is marked dirty: changed since it was last
+// written to the store.
+func (r *PageRef) Dirty() bool { return r.f.dirty.Load() }
+
 // Unpin releases the pin. Pass dirty=true if the page was modified. A second
 // Unpin of the same PageRef returns ErrAlreadyUnpinned and changes nothing.
 func (r *PageRef) Unpin(dirty bool) error {

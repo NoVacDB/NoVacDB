@@ -34,11 +34,11 @@ func TestMain(m *testing.M) {
 }
 
 func workerOptions() wal.EngineOptions {
-	return wal.EngineOptions{Frames: 6, WAL: wal.Options{SegmentSize: 16384}}
+	return wal.EngineOptions{Frames: 10, WAL: wal.Options{SegmentSize: 16384}}
 }
 
-// runWorker is the killed process. It prints "heaps a b" once the heaps are
-// durable, then "ack n" each time the first n operations are durable, and
+// runWorker is the killed process. It prints "ids a b t" once the heaps (first
+// pages a and b) and the tree (root t) are durable, then "ack n" each time the first n operations are durable, and
 // "done" if it finishes without being killed.
 func runWorker() int {
 	seed, err := strconv.ParseUint(os.Getenv(workerSeedEnv), 10, 64)
@@ -52,13 +52,13 @@ func runWorker() int {
 		return 1
 	}
 	d := &db{e: e}
-	firsts, err := d.createHeaps()
+	id, err := d.create()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "worker: heaps:", err)
+		fmt.Fprintln(os.Stderr, "worker: heaps and tree:", err)
 		return 1
 	}
 	out := bufio.NewWriter(os.Stdout)
-	fmt.Fprintf(out, "heaps %d %d\n", firsts[0], firsts[1])
+	fmt.Fprintf(out, "ids %d %d %d\n", id.heaps[0], id.heaps[1], id.tree)
 	_ = out.Flush()
 	w, m := newWorkload(seed), newModel()
 	for i := 1; i <= workerMaxOps; i++ {
@@ -83,9 +83,9 @@ func runWorker() int {
 }
 
 // killedRun starts a worker, kills it after it has acknowledged acksBeforeKill
-// flushes, and returns the heap IDs, the highest acknowledged operation count,
-// and whether the worker finished on its own.
-func killedRun(t *testing.T, dir string, seed uint64, acksBeforeKill int) (firsts [numHeaps]uint64, lastAck int, finished bool) {
+// flushes, and returns the heap and tree IDs, the highest acknowledged
+// operation count, and whether the worker finished on its own.
+func killedRun(t *testing.T, dir string, seed uint64, acksBeforeKill int) (id ids, lastAck int, finished bool) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), workerEnv+"=1", workerDirEnv+"="+dir, workerSeedEnv+"="+strconv.FormatUint(seed, 10))
@@ -102,14 +102,17 @@ func killedRun(t *testing.T, dir string, seed uint64, acksBeforeKill int) (first
 	parse := func(line string) {
 		f := strings.Fields(line)
 		switch {
-		case len(f) == 3 && f[0] == "heaps":
-			for i := range firsts {
+		case len(f) == numHeaps+2 && f[0] == "ids":
+			vals := make([]uint64, numHeaps+1)
+			for i := range vals {
 				v, err := strconv.ParseUint(f[1+i], 10, 64)
 				if err != nil {
 					t.Fatalf("bad line %q", line)
 				}
-				firsts[i] = v
+				vals[i] = v
 			}
+			copy(id.heaps[:], vals)
+			id.tree = vals[numHeaps]
 		case len(f) == 2 && f[0] == "ack":
 			n, err := strconv.Atoi(f[1])
 			if err != nil {
@@ -150,23 +153,23 @@ func killedRun(t *testing.T, dir string, seed uint64, acksBeforeKill int) (first
 	} else if stderr.Len() > 0 {
 		t.Fatalf("worker failed before it was killed: %s", stderr.String())
 	}
-	if firsts[0] == 0 {
-		t.Fatalf("worker never created its heaps (stderr: %s)", stderr.String())
+	if id.tree == 0 {
+		t.Fatalf("worker never created its heaps and tree (stderr: %s)", stderr.String())
 	}
-	return firsts, lastAck, finished
+	return id, lastAck, finished
 }
 
 // recoverAndMatch recovers dir and returns how many operations of the seed's
 // stream the recovered database reflects (at least lastAck), failing if it
 // matches no prefix of the stream.
-func recoverAndMatch(t *testing.T, dir string, seed uint64, firsts [numHeaps]uint64, lastAck int) int {
+func recoverAndMatch(t *testing.T, dir string, seed uint64, id ids, lastAck int) int {
 	t.Helper()
 	e, err := wal.OpenEngine(bg, vfs.OSFS{}, dir, workerOptions())
 	if err != nil {
 		t.Fatalf("seed %d: recovery: %v", seed, err)
 	}
 	d := &db{e: e}
-	rows, err := d.openHeaps(firsts)
+	rows, err := d.open(id)
 	if err != nil {
 		t.Fatalf("seed %d: after recovery: %v", seed, err)
 	}
@@ -203,11 +206,11 @@ func TestOSKill(t *testing.T) {
 		seed := base + uint64(i)
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			dir := t.TempDir() + "/db"
-			firsts, lastAck, finished := killedRun(t, dir, seed, 1+rng.IntN(60))
-			got := recoverAndMatch(t, dir, seed, firsts, lastAck)
+			id, lastAck, finished := killedRun(t, dir, seed, 1+rng.IntN(60))
+			got := recoverAndMatch(t, dir, seed, id, lastAck)
 			t.Logf("killed after %d acknowledged operations; recovered %d (finished=%v)", lastAck, got, finished)
 			// A second, clean reopen sees the same state.
-			if again := recoverAndMatch(t, dir, seed, firsts, got); again != got {
+			if again := recoverAndMatch(t, dir, seed, id, got); again != got {
 				t.Fatalf("second recovery saw %d operations, first saw %d", again, got)
 			}
 		})

@@ -1057,3 +1057,35 @@ func (f *fakeT) Fatalf(string, ...any) {
 	f.failed = true
 	panic("fatal")
 }
+
+func TestPageRefDirty(t *testing.T) {
+	e := newEnv(t, 4, nil)
+	r, err := e.bp.NewPage(bg, PageTypeHeap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Dirty() {
+		t.Fatal("a new page is not dirty")
+	}
+	id := r.ID()
+	if err := r.Unpin(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.bp.FlushPage(bg, id); err != nil {
+		t.Fatal(err)
+	}
+	r, err = e.bp.FetchPage(bg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Dirty() {
+		t.Fatal("a flushed page is dirty")
+	}
+	r.MarkDirty()
+	if !r.Dirty() {
+		t.Fatal("MarkDirty did not mark the page dirty")
+	}
+	if err := r.Unpin(false); err != nil {
+		t.Fatal(err)
+	}
+}

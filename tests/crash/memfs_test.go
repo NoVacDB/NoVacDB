@@ -16,6 +16,7 @@ const memDir = "/db"
 // not passing vacuously.
 type scenarioStats struct {
 	crashes, faultStops, lostOps, checkpoints, torn, kills int
+	deepTrees, treeShrinks                                 int // recoveries with a 3-level tree; with fewer nodes than before
 }
 
 // runScenario runs one seeded crash scenario: several cycles of random work,
@@ -29,7 +30,8 @@ func runScenario(t *testing.T, seed uint64) (st scenarioStats) {
 	ctl := rand.New(rand.NewPCG(seed, 99)) // crash points and options, separate from the workload stream
 	m := vfs.NewMemFS(seed)
 	opts := wal.EngineOptions{
-		Frames: 2 + ctl.IntN(14),
+		// B+Tree deletes latch a path plus a sibling: at least 8 frames.
+		Frames: 8 + ctl.IntN(10),
 		WAL:    wal.Options{SegmentSize: []int64{4096, 16384, 1 << 20}[ctl.IntN(3)]},
 	}
 	w := newWorkload(seed)
@@ -39,11 +41,16 @@ func runScenario(t *testing.T, seed uint64) (st scenarioStats) {
 		fail("creating the database: %v", err)
 	}
 	d := &db{e: e}
-	firsts, err := d.createHeaps()
+	id, err := d.create()
 	if err != nil {
-		fail("creating heaps: %v", err)
+		fail("creating heaps and tree: %v", err)
+	}
+	created, err := d.tree.Check(bg)
+	if err != nil {
+		fail("checking the new tree: %v", err)
 	}
 	acked := newModel()
+	prevNodes := created.Nodes
 
 	for cycle := range 1 + ctl.IntN(4) {
 		if ctl.IntN(10) < 6 {
@@ -73,6 +80,10 @@ func runScenario(t *testing.T, seed uint64) (st scenarioStats) {
 				states = append(states, cur.clone())
 			}
 			if err != nil {
+				// Only an injected fault may stop the work.
+				if !errors.Is(err, vfs.ErrInjected) {
+					fail("cycle %d: operation %d failed without an injected fault: %v", cycle, o.kind, err)
+				}
 				st.faultStops++
 				break
 			}
@@ -95,10 +106,17 @@ func runScenario(t *testing.T, seed uint64) (st scenarioStats) {
 			fail("cycle %d: recovery failed: %v", cycle, err)
 		}
 		d = &db{e: e2}
-		rows, err := d.openHeaps(firsts)
+		rows, err := d.open(id)
 		if err != nil {
 			fail("cycle %d: after recovery: %v", cycle, err)
 		}
+		if rows.treeStats.Height >= 3 {
+			st.deepTrees++
+		}
+		if rows.treeStats.Nodes < prevNodes {
+			st.treeShrinks++
+		}
+		prevNodes = rows.treeStats.Nodes
 		match := -1
 		for i := len(states) - 1; i >= 0; i-- {
 			if states[i].equal(rows) {
@@ -107,8 +125,8 @@ func runScenario(t *testing.T, seed uint64) (st scenarioStats) {
 			}
 		}
 		if match < 0 {
-			total := 0
-			for _, h := range rows {
+			total := len(rows.tree)
+			for _, h := range rows.heaps {
 				total += len(h)
 			}
 			fail("cycle %d: recovered %d rows matching none of the %d states since the last acknowledgement (acknowledged state has %d rows)",
@@ -143,6 +161,8 @@ func TestCrashRecoveryMemFS(t *testing.T) {
 		total.checkpoints += st.checkpoints
 		total.torn += st.torn
 		total.kills += st.kills
+		total.deepTrees += st.deepTrees
+		total.treeShrinks += st.treeShrinks
 	}
 	t.Logf("%d runs: %+v", runs, total)
 	if runs >= 100 {
@@ -150,6 +170,8 @@ func TestCrashRecoveryMemFS(t *testing.T) {
 			"crashes stopped by an injected fault":  total.faultStops,
 			"crashes that lost unacknowledged work": total.lostOps,
 			"checkpoints":                           total.checkpoints, "torn crashes": total.torn, "process kills": total.kills,
+			"recoveries of a three-level tree":     total.deepTrees,
+			"recoveries of a tree that had shrunk": total.treeShrinks,
 		} {
 			if n < runs/10 {
 				t.Errorf("only %d %s in %d runs: the harness is not exercising enough", n, name, runs)

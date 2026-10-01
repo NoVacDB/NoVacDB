@@ -1,6 +1,6 @@
 # 08 — B+Tree Indexes (`internal/btree`)
 
-Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2, 3.3, 3.4.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). All of it is implemented.** Written and approved under the standing autonomous-mode instruction.
 
 The whole phase is designed in one document because its parts constrain each other: how splits and merges are done (3.2, 3.3) is dictated by how they must be latched and logged (3.5).
 
@@ -150,6 +150,13 @@ Redo installs images unconditionally and applies leaf operations only if the pag
 
 The wal engine gains `CreateBTree` and `OpenBTree`, replays type-3 records, and lets the checkpointer free deferred pages.
 
+Notes from the implementation:
+
+- `btree.Logger` has two methods: `LogBTree(ctx, build)` (as heaps' `Log`, but the record is type 3) and `DeferFree(page, lsn)`. `wal.Logger` implements both.
+- Every logged step goes through one small helper: `touch` marks a page dirty under its exclusive latch and keeps a copy, `commit` logs the record and stamps the LSN, or restores every copy if logging fails. Structural changes are built in scratch first and only then touched and copied in.
+- A page allocated for a split whose record failed to log is leaked, never freed: the record may still reach the log. One allocated but never touched by a record (the change failed before logging) is freed at once, because nothing can name it.
+- The checkpointer frees deferred pages after it writes the control file (step 6 of 07-checkpoints-recovery.md section 2.4). By then the log is durable through the checkpoint record, so the record that unlinked each page is durable too. A page still pinned for an instant, and the pages after a failed free, wait for the next checkpoint.
+
 ## 3. Formats
 
 All integers little-endian. Page header (24 bytes) as in 02-page-format.md, with `PageType` 4 (internal) or 5 (leaf).
@@ -223,6 +230,19 @@ See 2.9. The tree has no tree-wide lock: all coordination is through page latche
 - **WAL (3.5):** the image rule; replay equals reality, including onto torn pages from the redo point; logging failure restores pages; deferred frees happen only after the redo point passes; the crash harness in `tests/crash` gains B+Tree operations, checked against the model after every crash.
 - **Benchmarks:** insert, point lookup, scan.
 
+Benchmarks (Step 3.5; `go test -bench . ./internal/btree/`, 4-core 2.1 GHz Xeon, a pool large enough to hold the tree, 16-byte keys and 8-byte values, 100,000 entries for lookups and scans):
+
+| benchmark | time | allocations |
+|---|---|---|
+| Insert, random keys, unlogged | 2.1 µs | 8 |
+| Insert, sequential keys, unlogged | 2.1 µs | 9 |
+| Insert, random keys, logged (in-memory log) | 5.1 µs | 18 |
+| Insert, sequential keys, logged | 4.2 µs | 19 |
+| Get | 1.2 µs | 4 |
+| Get, 4 goroutines | 2.1 µs | 4 |
+| Scan, per entry | 83 ns | 2 |
+| Delete then re-insert, logged | 11.8 µs | 28 |
+
 ## 8. Limitations
 
 - Keys must be unique; non-unique indexes append the RID (Phase 4).
@@ -231,3 +251,5 @@ See 2.9. The tree has no tree-wide lock: all coordination is through page latche
 - Scans are per-leaf consistent, not snapshots.
 - Pages leak if a crash loses the deferred-free list, or happens between allocating and logging a split.
 - Redistribution may leave a node a little underfull when the new separator does not fit.
+- Point lookups do not scale across cores yet: every page pin takes the buffer pool's single mutex (see the parallel `Get` benchmark). A sharded page table would fix it.
+- A logged change copies each page it touches (8 KiB) for rollback, which dominates the cost of a logged insert.

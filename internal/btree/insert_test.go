@@ -12,9 +12,12 @@ import (
 	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
 )
 
-// opsBudget scales the random model tests: NOVACDB_BTREE_OPS overrides the
-// default number of operations per test.
-func opsBudget(t testing.TB, def int) int {
+// defaultOps is the operation budget of the random model tests.
+const defaultOps = 60000
+
+// opsBudget scales the random model tests: NOVACDB_BTREE_OPS overrides
+// defaultOps.
+func opsBudget(t testing.TB) int {
 	t.Helper()
 	if s := os.Getenv("NOVACDB_BTREE_OPS"); s != "" {
 		v, err := strconv.Atoi(s)
@@ -23,7 +26,7 @@ func opsBudget(t testing.TB, def int) int {
 		}
 		return v
 	}
-	return def
+	return defaultOps
 }
 
 // model is the reference for a tree: a plain map.
@@ -85,7 +88,7 @@ func (g keyGen) value() []byte {
 
 func TestInsertModel(t *testing.T) {
 	seed := testSeed(t)
-	budget := opsBudget(t, 60000)
+	budget := opsBudget(t)
 	for _, c := range []struct {
 		frames, large int
 	}{{8, 0}, {8, 5}, {16, 30}, {64, 2}} {

@@ -8,6 +8,7 @@ import (
 	"path"
 	"sync"
 
+	"github.com/vikrant-choudhary06/NoVacDB/internal/btree"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
 )
@@ -33,13 +34,14 @@ const defaultFrames = 256
 type RecoveryStats struct {
 	RedoLSN  LSN // where replay started
 	EndLSN   LSN // where the log ended
-	Replayed int // heap records replayed
+	Replayed int // heap and B+Tree records replayed
 }
 
 // Engine is a database directory with crash recovery: a data file, its log,
 // a buffer pool that obeys the WAL rule, and checkpoints. See
-// docs/design/07-checkpoints-recovery.md. It does not know which heaps exist;
-// callers keep their first page IDs (until the catalog, Step 4.4).
+// docs/design/07-checkpoints-recovery.md. It does not know which heaps and
+// trees exist; callers keep their first and root page IDs (until the
+// catalog, Step 4.4).
 type Engine struct {
 	fsys vfs.FS
 	dir  string
@@ -143,6 +145,11 @@ func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
 				return fmt.Errorf("replay: %w: %w", ErrCorrupt, err)
 			}
 			e.rec.Replayed++
+		case RecordBTree:
+			if err := btree.Redo(ctx, e.bp, uint64(rec.LSN), rec.Payload); err != nil {
+				return fmt.Errorf("replay: %w: %w", ErrCorrupt, err)
+			}
+			e.rec.Replayed++
 		case RecordCheckpoint:
 			// Nothing to redo; recovery already chose its start point.
 		default:
@@ -180,6 +187,26 @@ func (e *Engine) OpenHeap(ctx context.Context, first uint64) (*storage.Heap, err
 	}
 	return storage.OpenHeap(ctx, e.bp, first, storage.WithLogger(e.lg))
 }
+
+// CreateBTree creates a new, logged B+Tree. Its root page ID identifies it;
+// it survives a crash once a Flush has returned after CreateBTree.
+func (e *Engine) CreateBTree(ctx context.Context) (*btree.Tree, error) {
+	if err := e.check(); err != nil {
+		return nil, err
+	}
+	return btree.Create(ctx, e.bp, btree.WithLogger(e.lg))
+}
+
+// OpenBTree opens the logged B+Tree whose root page is root.
+func (e *Engine) OpenBTree(ctx context.Context, root uint64) (*btree.Tree, error) {
+	if err := e.check(); err != nil {
+		return nil, err
+	}
+	return btree.Open(ctx, e.bp, root, btree.WithLogger(e.lg))
+}
+
+// Logger returns the engine's logger.
+func (e *Engine) Logger() *Logger { return e.lg }
 
 // Flush makes every change made so far durable; it is the point at which
 // changes are acknowledged (later, COMMIT).

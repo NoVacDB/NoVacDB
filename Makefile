@@ -1,6 +1,6 @@
 FUZZTIME ?= 30s
 
-.PHONY: build test cover lint fuzz crashtest sqltest bench check
+.PHONY: build test cover lint fuzz crashtest stress sqltest bench check
 
 build:
 	go build -o bin/novacdb ./cmd/novacdb
@@ -38,6 +38,12 @@ CRASH_RUNS ?= 3000
 OSKILL_RUNS ?= 30
 crashtest:
 	NOVACDB_CRASH_RUNS=$(CRASH_RUNS) NOVACDB_OSKILL_RUNS=$(OSKILL_RUNS) go test -count=1 -timeout 60m ./tests/crash/...
+
+# Long random model runs of the B+Tree: BTREE_OPS operations per model test
+# configuration (millions in total). Not part of check: it takes a while.
+BTREE_OPS ?= 4000000
+stress:
+	NOVACDB_BTREE_OPS=$(BTREE_OPS) go test -count=1 -timeout 120m -run 'Model' ./internal/btree/
 
 sqltest:
 	@echo "sqltest: SQL logic test runner not built yet (arrives in Step 4.6)"

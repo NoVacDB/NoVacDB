@@ -25,9 +25,14 @@ func (t *Tree) Delete(ctx context.Context, key []byte) (bool, error) {
 		return false, fmt.Errorf("delete: %d-byte key: %w", len(key), ErrKeyTooLarge)
 	}
 	found, freed, err := t.delete(ctx, key)
-	// Pages are freed once nothing is latched: no one can reach them.
-	for _, id := range freed {
-		err = errors.Join(err, t.freePage(ctx, id))
+	// Pages are freed once nothing is latched: no one can reach them. In a
+	// logged tree only once no record that refers to them can be replayed.
+	for _, f := range freed {
+		if t.lg != nil {
+			t.lg.DeferFree(f.page, f.lsn)
+		} else {
+			err = errors.Join(err, t.freePage(ctx, f.page))
+		}
 	}
 	if err != nil {
 		return found, fmt.Errorf("delete: %w", err)
@@ -35,7 +40,11 @@ func (t *Tree) Delete(ctx context.Context, key []byte) (bool, error) {
 	return found, nil
 }
 
-func (t *Tree) delete(ctx context.Context, key []byte) (found bool, freed []uint64, err error) {
+// unlinked is a page a merge or collapse removed from the tree, by the
+// record at lsn.
+type unlinked struct{ page, lsn uint64 }
+
+func (t *Tree) delete(ctx context.Context, key []byte) (found bool, freed []unlinked, err error) {
 	ref, n, err := t.fetch(ctx, t.root, true)
 	if err != nil {
 		return false, nil, err
@@ -81,9 +90,13 @@ func (t *Tree) delete(ctx context.Context, key []byte) (found bool, freed []uint
 	if !found {
 		return false, nil, nil
 	}
-	leaf.ref.MarkDirty()
+	m := t.mutation()
+	m.touch(leaf.ref, &Block{Kind: BlockLeafDelete, Index: uint16(i), Key: key})
 	if err := leaf.n.remove(i); err != nil {
 		return false, nil, fmt.Errorf("page %d: %w", leaf.ref.ID(), err)
+	}
+	if _, err := m.commit(ctx); err != nil {
+		return false, nil, err
 	}
 
 	// Repair bottom-up. Every node checked here is either the leaf or was
@@ -102,19 +115,19 @@ func (t *Tree) delete(ctx context.Context, key []byte) (found bool, freed []uint
 			return true, freed, err
 		}
 		path[j] = survivor
-		if gone != 0 {
+		if gone.page != 0 {
 			freed = append(freed, gone)
 		}
 	}
 	if path[0].ref.ID() == t.root && len(path) > 1 {
-		gone, err := collapseRoot(path[0], path[1])
+		lsn, gone, err := t.collapseRoot(ctx, path[0], path[1])
 		if err != nil {
 			return true, freed, err
 		}
 		if gone {
 			t.ops.collapses.Add(1)
 			release(path[1].ref, true)
-			freed = append(freed, path[1].ref.ID())
+			freed = append(freed, unlinked{path[1].ref.ID(), lsn})
 			path = append(path[:1], path[2:]...) // the rest stay latched
 		}
 	}
@@ -152,11 +165,12 @@ func underfull(n node) (bool, error) {
 // repair fixes the underfull node x, a child of p, with a sibling: merging
 // the two if they fit in one node, else moving cells from the sibling.
 // It returns the node that now holds x's keys (still latched) and the page
-// freed by a merge, if any (no longer latched or pinned). If x has no
-// sibling it stays underfull, which is allowed.
-func (t *Tree) repair(ctx context.Context, p, x held) (held, uint64, error) {
+// unlinked by a merge, if any (no longer latched or pinned). If x has no
+// sibling it stays underfull, which is allowed. If it fails nothing has
+// changed.
+func (t *Tree) repair(ctx context.Context, p, x held) (held, unlinked, error) {
 	if p.n.numCells() == 0 {
-		return x, 0, nil
+		return x, unlinked{}, nil
 	}
 	sibPos := x.pos - 1
 	if x.pos == 0 {
@@ -164,11 +178,11 @@ func (t *Tree) repair(ctx context.Context, p, x held) (held, uint64, error) {
 	}
 	sid, err := p.n.childAt(sibPos)
 	if err != nil {
-		return x, 0, fmt.Errorf("page %d: %w", p.ref.ID(), err)
+		return x, unlinked{}, fmt.Errorf("page %d: %w", p.ref.ID(), err)
 	}
 	sref, sn, err := t.childOf(ctx, p.n, sid, true)
 	if err != nil {
-		return x, 0, err
+		return x, unlinked{}, err
 	}
 	s := held{ref: sref, n: sn, pos: sibPos}
 	l, r := s, x
@@ -177,32 +191,40 @@ func (t *Tree) repair(ctx context.Context, p, x held) (held, uint64, error) {
 	}
 	if l.n.isLeaf() != r.n.isLeaf() {
 		release(sref, true)
-		return x, 0, corrupt("siblings %d and %d are of different kinds", l.ref.ID(), r.ref.ID())
+		return x, unlinked{}, corrupt("siblings %d and %d are of different kinds", l.ref.ID(), r.ref.ID())
 	}
 	sepIdx := r.pos - 1
 	k, err := p.n.key(sepIdx)
 	if err != nil {
 		release(sref, true)
-		return x, 0, fmt.Errorf("page %d: %w", p.ref.ID(), err)
+		return x, unlinked{}, fmt.Errorf("page %d: %w", p.ref.ID(), err)
 	}
 	sep := bytes.Clone(k)
 
 	merged, err := mergeNodes(l.n, r.n, sep)
 	if err != nil {
 		release(sref, true)
-		return x, 0, err
+		return x, unlinked{}, err
 	}
 	if merged != nil {
-		p.ref.MarkDirty()
-		if err := p.n.remove(sepIdx); err != nil {
+		pb := node{bytes.Clone(p.n.b)}
+		if err := pb.remove(sepIdx); err != nil {
 			release(sref, true)
-			return x, 0, fmt.Errorf("page %d: %w", p.ref.ID(), err)
+			return x, unlinked{}, fmt.Errorf("page %d: %w", p.ref.ID(), err)
 		}
-		l.ref.MarkDirty()
-		t.ops.merges[kindIndex(l.n)].Add(1)
+		m := t.mutation()
+		m.touch(p.ref, nil)
+		m.touch(l.ref, nil)
+		copy(p.n.b, pb.b)
 		copy(l.n.b, merged)
+		lsn, err := m.commit(ctx)
+		if err != nil {
+			release(sref, true)
+			return x, unlinked{}, err
+		}
+		t.ops.merges[kindIndex(l.n)].Add(1)
 		release(r.ref, true)
-		return l, r.ref.ID(), nil
+		return l, unlinked{r.ref.ID(), lsn}, nil
 	}
 
 	lb, rb, newSep, err := redistribute(l.n, r.n, sep, x.pos == 0)
@@ -210,21 +232,24 @@ func (t *Tree) repair(ctx context.Context, p, x held) (held, uint64, error) {
 		var pb []byte
 		pb, err = replaceSeparator(p.n, sepIdx, newSep, r.ref.ID())
 		if err == nil && pb != nil {
-			p.ref.MarkDirty()
-			l.ref.MarkDirty()
-			r.ref.MarkDirty()
-			dir := 0
-			if x.pos != 0 {
-				dir = 1
-			}
-			t.ops.redistributions[kindIndex(l.n)][dir].Add(1)
+			m := t.mutation()
+			m.touch(p.ref, nil)
+			m.touch(l.ref, nil)
+			m.touch(r.ref, nil)
 			copy(p.n.b, pb)
 			copy(l.n.b, lb)
 			copy(r.n.b, rb)
+			if _, err = m.commit(ctx); err == nil {
+				dir := 0
+				if x.pos != 0 {
+					dir = 1
+				}
+				t.ops.redistributions[kindIndex(l.n)][dir].Add(1)
+			}
 		}
 	}
 	release(sref, true)
-	return x, 0, err
+	return x, unlinked{}, err
 }
 
 // mergeNodes returns l's page with r's content appended (for internal nodes,
@@ -412,23 +437,28 @@ func replaceSeparator(p node, i int, key []byte, child uint64) ([]byte, error) {
 
 // collapseRoot replaces an internal root that has no keys with the content
 // of its only child, c, which the caller then frees. It reports whether it
-// did.
-func collapseRoot(root, c held) (bool, error) {
+// did, and the LSN of the record that did it.
+func (t *Tree) collapseRoot(ctx context.Context, root, c held) (uint64, bool, error) {
 	if root.n.isLeaf() || root.n.numCells() != 0 || root.n.child0() != c.ref.ID() {
-		return false, nil
+		return 0, false, nil
 	}
 	h, err := storage.DecodeHeader(root.n.b)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
 	buf := make([]byte, storage.PageSize)
 	if err := storage.InitPage(buf, storage.Header{ID: h.ID, LSN: h.LSN, Type: c.n.pageType()}); err != nil {
-		return false, err
+		return 0, false, err
 	}
 	copy(buf[storage.HeaderSize:], c.n.b[storage.HeaderSize:])
-	root.ref.MarkDirty()
+	m := t.mutation()
+	m.touch(root.ref, nil)
 	copy(root.n.b, buf)
-	return true, nil
+	lsn, err := m.commit(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	return lsn, true, nil
 }
 
 // freePage frees a page no node refers to any more. A reader that latched

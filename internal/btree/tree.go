@@ -23,8 +23,16 @@ var (
 type Tree struct {
 	bp   *storage.BufferPool
 	root uint64
+	lg   Logger // nil: changes are not logged
 	ops  counters
 }
+
+// Option configures a Tree.
+type Option func(*Tree)
+
+// WithLogger makes the tree log every change through lg before it can reach
+// disk. Without it the tree is not crash-safe.
+func WithLogger(lg Logger) Option { return func(t *Tree) { t.lg = lg } }
 
 // counters count structural changes, so tests can show which paths they
 // exercised (and, later, for metrics). Index 0 is leaves, 1 internal nodes.
@@ -42,27 +50,46 @@ func kindIndex(n node) int {
 	return 1
 }
 
-// Create creates an empty tree: a root page that is an empty leaf.
-func Create(ctx context.Context, bp *storage.BufferPool) (*Tree, error) {
+// Create creates an empty tree: a root page that is an empty leaf. A logged
+// tree survives a crash once the record of its root is durable.
+func Create(ctx context.Context, bp *storage.BufferPool, opts ...Option) (*Tree, error) {
+	t := &Tree{bp: bp}
+	for _, o := range opts {
+		o(t)
+	}
 	ref, err := bp.NewPage(ctx, storage.PageTypeBTreeLeaf)
 	if err != nil {
 		return nil, fmt.Errorf("creating tree: %w", err)
 	}
 	ref.Lock()
+	m := t.mutation()
+	m.touch(ref, nil)
 	err = initNode(ref.Data(), true, 0)
+	if err == nil {
+		_, err = m.commit(ctx)
+	}
 	ref.Unlock()
-	if uerr := ref.Unpin(true); err == nil {
+	// If logging failed the page is not freed: the record may still reach
+	// the log, and recovery would then use the page. It leaks instead.
+	if uerr := ref.Unpin(false); err == nil {
 		err = uerr
 	}
 	if err != nil {
 		return nil, fmt.Errorf("creating tree: %w", err)
 	}
-	return &Tree{bp: bp, root: ref.ID()}, nil
+	t.root = ref.ID()
+	return t, nil
 }
 
+// mutation starts collecting the pages of one logged change.
+func (t *Tree) mutation() *mutation { return &mutation{t: t} }
+
 // Open opens the tree whose root page is root.
-func Open(ctx context.Context, bp *storage.BufferPool, root uint64) (*Tree, error) {
+func Open(ctx context.Context, bp *storage.BufferPool, root uint64, opts ...Option) (*Tree, error) {
 	t := &Tree{bp: bp, root: root}
+	for _, o := range opts {
+		o(t)
+	}
 	ref, _, err := t.fetch(ctx, root, false)
 	if err != nil {
 		return nil, fmt.Errorf("opening tree at page %d: %w", root, err)

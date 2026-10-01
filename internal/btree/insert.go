@@ -84,11 +84,13 @@ func (t *Tree) insert(ctx context.Context, key, value []byte) error {
 	if found {
 		return ErrKeyExists
 	}
-	ref.MarkDirty()
+	m := t.mutation()
+	m.touch(ref, &Block{Kind: BlockLeafInsert, Index: uint16(i), Key: key, Value: value})
 	if err := n.insertLeaf(i, key, value); err != nil {
 		return fmt.Errorf("page %d: %w", ref.ID(), err)
 	}
-	return nil
+	_, err = m.commit(ctx)
+	return err
 }
 
 // needsSplit reports whether a node must be split before the insert passes
@@ -211,7 +213,8 @@ func (t *Tree) newNode(ctx context.Context, leaf bool) (*storage.PageRef, error)
 	return ref, nil
 }
 
-// discard gives back pages allocated for a change that did not happen.
+// discard gives back pages allocated for a change that was never made, so
+// no record can name them.
 func (t *Tree) discard(ctx context.Context, refs ...*storage.PageRef) error {
 	var errs []error
 	for _, r := range refs {
@@ -252,22 +255,32 @@ func (t *Tree) splitChild(ctx context.Context, pref *storage.PageRef, parent nod
 	}
 	leaf, level := child.isLeaf(), child.level()
 	left, err := build(child.b, leaf, level, child.child0(), h.left)
-	var right []byte
+	var right, top []byte
 	if err == nil {
 		right, err = build(rref.Data(), leaf, level, h.rightChild0, h.right)
 	}
 	if err == nil {
-		pref.MarkDirty()
-		err = parent.insertInner(pos, h.sep, rref.ID())
+		top = bytes.Clone(parent.b)
+		err = node{top}.insertInner(pos, h.sep, rref.ID())
 	}
 	if err != nil {
+		// needsSplit made room in the parent, so it or the child is corrupt.
 		return nil, nil, errors.Join(fmt.Errorf("splitting page %d: %w", cref.ID(), err), t.discard(ctx, rref))
 	}
-	cref.MarkDirty()
-	rref.MarkDirty()
-	t.ops.splits[kindIndex(child)].Add(1)
+	m := t.mutation()
+	m.touch(pref, nil)
+	m.touch(cref, nil)
+	m.touch(rref, nil)
+	copy(parent.b, top)
 	copy(child.b, left)
 	copy(rref.Data(), right)
+	if _, err := m.commit(ctx); err != nil {
+		// The pages are restored. The new page is not freed: the record
+		// may still reach the log. It leaks instead.
+		release(rref, true)
+		return nil, nil, err
+	}
+	t.ops.splits[kindIndex(child)].Add(1)
 	return rref, h.sep, nil
 }
 
@@ -305,14 +318,19 @@ func (t *Tree) splitRoot(ctx context.Context, ref *storage.PageRef, root node) e
 	if err != nil {
 		return errors.Join(fmt.Errorf("splitting root %d: %w", ref.ID(), err), t.discard(ctx, lref, rref))
 	}
-	ref.MarkDirty()
-	lref.MarkDirty()
-	rref.MarkDirty()
-	t.ops.rootSplits[kindIndex(root)].Add(1)
+	kind := kindIndex(root)
+	m := t.mutation()
+	m.touch(ref, nil)
+	m.touch(lref, nil)
+	m.touch(rref, nil)
 	copy(lref.Data(), left)
 	copy(rref.Data(), right)
 	copy(root.b, top)
+	_, err = m.commit(ctx) // on failure the pages are restored and the new ones leak
 	release(lref, true)
 	release(rref, true)
-	return nil
+	if err == nil {
+		t.ops.rootSplits[kind].Add(1)
+	}
+	return err
 }

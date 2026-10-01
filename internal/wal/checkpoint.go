@@ -8,12 +8,14 @@ import (
 	"io"
 	"sync"
 
+	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
 )
 
-// pageFlusher writes every dirty page (storage.BufferPool).
+// pageFlusher writes every dirty page and frees pages (storage.BufferPool).
 type pageFlusher interface {
 	FlushAll(ctx context.Context) error
+	DeletePage(ctx context.Context, id uint64) error
 }
 
 // dataSyncer makes written pages durable (storage.DiskManager).
@@ -77,11 +79,37 @@ func (c *Checkpointer) Checkpoint(ctx context.Context) (Control, error) {
 	if err := WriteControl(c.fsys, c.dir, ctl); err != nil {
 		return Control{}, fmt.Errorf("checkpoint: %w", err)
 	}
-	// 6. Log before the redo point is no longer needed.
+	// 6. Pages unlinked by records before the redo point can be freed: no
+	// record that refers to them will ever be replayed.
+	if err := c.freeDeferred(ctx, redo); err != nil {
+		return ctl, fmt.Errorf("checkpoint: %w", err)
+	}
+	// 7. Log before the redo point is no longer needed.
 	if _, err := c.w.RemoveSegmentsBefore(ctx, redo); err != nil {
 		return ctl, fmt.Errorf("checkpoint: removing old log: %w", err)
 	}
 	return ctl, nil
+}
+
+// freeDeferred frees the deferred pages whose record lies before redo. A
+// page still pinned (a reader that had just let go of it) and the pages after
+// a failure wait for the next checkpoint.
+func (c *Checkpointer) freeDeferred(ctx context.Context, redo LSN) error {
+	pending := c.lg.takeFreeable(redo)
+	for i, d := range pending {
+		err := c.pages.DeletePage(ctx, d.page)
+		if errors.Is(err, storage.ErrPagePinned) {
+			c.lg.DeferFree(d.page, d.lsn)
+			continue
+		}
+		if err != nil {
+			for _, rest := range pending[i:] {
+				c.lg.DeferFree(rest.page, rest.lsn)
+			}
+			return fmt.Errorf("freeing page %d: %w", d.page, err)
+		}
+	}
+	return nil
 }
 
 // RedoStart returns the LSN recovery must replay from, using the control file

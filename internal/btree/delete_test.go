@@ -85,7 +85,7 @@ func TestInsertDeleteModel(t *testing.T) {
 	seed := testSeed(t)
 	var total opCounts
 	defer func() { total.requireMost(t) }()
-	budget := opsBudget(t, 60000)
+	budget := opsBudget(t)
 	for _, c := range []struct {
 		frames, large, maxLen, insertPct int
 	}{{12, 0, 24, 55}, {12, 0, 400, 60}, {12, 5, 100, 55}, {24, 30, 24, 55}, {64, 2, 200, 60}} {

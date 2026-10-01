@@ -77,7 +77,8 @@ A **control file** `control` (section 3) in the database directory records the l
 3. `DiskManager.Sync`: those writes are durable.
 4. Append a checkpoint record (payload: the redo LSN) and flush the log up to it.
 5. Write the control file.
-6. Delete log segments that end at or before the redo LSN (never the current segment), and fsync the directory.
+6. Free the pages B+Trees unlinked by records before the redo LSN (Phase 3, see 08-btree.md section 2.7): no record that refers to them can be replayed any more.
+7. Delete log segments that end at or before the redo LSN (never the current segment), and fsync the directory.
 
 A crash at any point leaves the previous control file in force. Its redo point is still in the log, because segments are deleted only after step 5. Only one checkpoint runs at a time.
 
@@ -141,7 +142,7 @@ It does not remember which heaps exist; that is the catalog (Step 4.4). Its call
 
 All integers little-endian.
 
-**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint.
+**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint, `3` B+Tree change (format in 08-btree.md).
 
 **Heap record payload** (the WAL record's payload, type 1):
 
