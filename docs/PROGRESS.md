@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 3.4 — Range scans** (design in `08-btree.md`)
+👉 **Step 3.5 — Concurrency, WAL, and crash safety** (design in `08-btree.md`)
 
 ---
 
@@ -30,6 +30,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 3.1 Node format and search | ✅ Done | Design doc `08-btree.md` for all of Phase 3. `internal/btree`: memcomparable key encoding (NULL, bool, int64, float64, bytes) with strict `DecodeKey`, node format with checked accessors, binary search, compaction, `Validate`; `Create`/`Open`/`Get`/`Check`. 2 fuzz targets; 38 deliberate-bug checks (1 equivalent). Fuzz minimisation capped at 5s in `make fuzz`. |
 | 2026-10-01 | 3.2 Insert with splits | ✅ Done | Top-down preemptive splits (a split never propagates up), root split in place so the root page never moves, splits built in scratch so a failed split changes nothing. Model tests (3.1M inserts in a long run, heights up to 6), max-size keys, sequential orders. 16 deliberate-bug checks (2 equivalent). |
 | 2026-10-01 | 3.3 Delete with merge and redistribution | ✅ Done | Latch crabbing (only the unsafe part of the path stays latched; 1.01 latches at the leaf on average), bottom-up merge or redistribution with a sibling, in-place root collapse, freed pages reused. Found and fixed a latch leak in root collapse. Model tests (3.9M mixed operations in a long run), every repair path counted and required, crash-leftover shapes, corrupt trees. 34 deliberate-bug checks (3 equivalent). |
+| 2026-10-01 | 3.4 Range scans | ✅ Done | Iterator with inclusive/exclusive/unbounded bounds that holds nothing between calls: it copies one leaf per descent and finds the next leaf through the upper fence, so leaves need no sibling links (the plan's "leaf chains" replaced, see 08-btree.md). One descent per leaf; strictly increasing keys under concurrent writes. 17 deliberate-bug checks (1 equivalent). |
 
 ---
 
@@ -118,10 +119,10 @@ Leaf and internal splits, new root creation.
 ### ✅ Step 3.3 — Delete with merge and redistribution
 Underflow handling, root collapse.
 
-### 👉 Step 3.4 — Range scans
+### ✅ Step 3.4 — Range scans
 Iterators over leaf chains, forward scans with start/end bounds.
 
-### ⬜ Step 3.5 — Concurrency, WAL, and crash safety
+### 👉 Step 3.5 — Concurrency, WAL, and crash safety
 Latch crabbing for concurrent access, WAL logging of index changes, crash tests.
 
 **Phase 3 acceptance:** Model-based tests against a sorted map with millions of random operations; concurrent tests under `-race`; crash tests pass; benchmarks recorded.

@@ -16,4 +16,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [05](05-heap-storage.md) | Slotted pages and heap tables (`internal/storage`) | Implemented |
 | [06](06-wal.md) | WAL writer and reader (`internal/wal`) | Implemented |
 | [07](07-checkpoints-recovery.md) | Logging heap changes, checkpoints, crash recovery (`internal/storage`, `internal/wal`) | Implemented |
-| [08](08-btree.md) | B+Tree indexes (`internal/btree`) | In progress (3.1–3.3 implemented) |
+| [08](08-btree.md) | B+Tree indexes (`internal/btree`) | In progress (3.1–3.4 implemented) |

@@ -1,6 +1,6 @@
 # 08 — B+Tree Indexes (`internal/btree`)
 
-Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2, 3.3.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for all of Phase 3; each part is implemented in its step (3.1 node format, key encoding, search; 3.2 insert; 3.3 delete; 3.4 range scans; 3.5 concurrency, WAL, crash safety). Implemented so far: 3.1, 3.2, 3.3, 3.4.** Written and approved under the standing autonomous-mode instruction.
 
 The whole phase is designed in one document because its parts constrain each other: how splits and merges are done (3.2, 3.3) is dictated by how they must be latched and logged (3.5).
 
@@ -102,6 +102,8 @@ Notes from the implementation:
   - So keys come back strictly increasing, never twice, and the iterator cannot follow a pointer to a page that a concurrent merge has made stale. This is why leaves have **no sibling links**: re-descending is what makes scans safe without holding latches between calls, and without links, splits and merges have fewer pages to change and log.
   - The cost is one root-to-leaf descent per leaf, not per row.
   - A scan sees each leaf as it was when it copied it. There is no snapshot across leaves; that is MVCC, Phase 6.
+  - To find the next leaf without sibling links, the descent records the leaf's **upper fence**: the separator just right of the path at the deepest level that has one. Every key at or above the fence lies in a later leaf, so the next refill seeks the fence inclusively. A key present for the whole scan is always returned: when its leaf was copied, every key between the seek position and the fence was in that leaf. The rightmost leaf has no fence, which ends the scan.
+  - The API is `Scan(start, end Bound)` with `Incl(key)`, `Excl(key)` and the zero `Bound` (unbounded); `Next(ctx)` returns copies. An error is sticky.
 
 ### 2.7 Freeing pages
 
