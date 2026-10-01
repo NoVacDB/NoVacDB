@@ -1,7 +1,6 @@
 # 07 — Logging, Checkpoints and Crash Recovery
 
-Status: **Logging implemented in Step 2.3, checkpoints in Step 2.4; recovery (Step 2.5) designed here and implemented in its step.** Written and approved under the standing autonomous-mode instruction.
-
+Status: **Implemented: logging in Step 2.3, checkpoints in Step 2.4, recovery, engine and crash harness in Step 2.5.** Written and approved under the standing autonomous-mode instruction. 
 This document covers the rest of Phase 2, because the three parts depend on each other: what a log record contains (2.3) is decided by what recovery needs (2.5), and what recovery needs is decided by what a checkpoint guarantees (2.4).
 
 ## 1. Problem
@@ -132,6 +131,12 @@ It does not remember which heaps exist; that is the catalog (Step 4.4). Its call
 - **The LSN check on operations** (skip if the page's LSN is not below the record's) is never needed in a correct full or from-redo-point replay, because each page's first record after the redo point is an image. It stays as the standard safety net, and is tested directly.
 - Logged heaps are opt-in (`WithLogger`); the unlogged Step 1.4 paths are unchanged, so their tests (including one-frame pools) still apply.
 
+### 2.9 Implementation notes (Step 2.5)
+
+- `wal.Engine` and `wal.OpenEngine` implement section 2.5 as designed, with `Recovery()` reporting where replay started and how many records it replayed. The data file is created before the log, so a log with no data file is reported as `ErrCorrupt`, not silently recreated.
+- The `Logger`'s initial redo point does not matter in practice: the end-of-recovery checkpoint resets it before any heap is handed out. A deliberate bug that started it at 0 was therefore indistinguishable from correct code.
+- The harness compares rows by an 8-byte key stored in each tuple, never by RID, and reads the RIDs back after each recovery, so the oracle does not depend on where recovery places rows. (Redo reproduces slots exactly anyway, and redo checks this.)
+
 ## 3. Formats
 
 All integers little-endian.
@@ -227,7 +232,11 @@ A block's page ID must be at least 2, two blocks must name different pages, the 
 - Checkpoints running concurrently with several writers, then a crash and recovery: identical database (100 race-detector runs).
 - `RedoStart` refuses: a missing checkpoint record, a control file naming a heap record, a redo mismatch, a checkpoint beyond the log, a lost control file after trimming, a damaged control file.
 
-**Step 2.5:** in its section of this document when it is implemented (the engine, the crash harness, the OS kill test).
+**Step 2.5 (recovery, engine, harness):**
+- Engine: create, reopen after a clean close (nothing replayed), use after close; recovery after a crash with checkpoints rebuilds exactly the acknowledged rows; recovery ends with a checkpoint (a second crash with no new work replays nothing); refuses a lost data file, an unknown record type and a malformed heap record; an injected I/O fault at each point of `OpenEngine` followed by a torn crash never stops the next open from recovering.
+- **`tests/crash` MemFS harness.** Seeded scenarios with random pool and segment sizes and several crash cycles each. Each cycle runs random inserts, updates, deletes, flushes and checkpoints on two heaps, sometimes with an injected I/O fault (write, sync, create, rename, remove, read, truncate). It ends with a torn power cut, a plain power cut or a killed process. After recovery the rows must equal the model **after some number of operations since the last acknowledged flush**, which proves atomicity, order and durability at once. The test also asserts that faults, lost unacknowledged work, checkpoints, torn crashes and process kills all actually happen.
+- **`tests/crash` OS kill test.** A worker process (the test binary re-run) works on a real directory and prints an acknowledgement after each durable flush. The parent kills it with SIGKILL after a random number of acknowledgements (synchronised on that output), recovers, regenerates the same operation stream from the seed, and requires the recovered rows to equal its state after at least the acknowledged number of operations. A second reopen must see the same.
+- `make crashtest` runs 3000 MemFS scenarios and 30 SIGKILL runs. A failure prints the seed and the environment variables that reproduce it.
 
 ## 8. Limitations
 

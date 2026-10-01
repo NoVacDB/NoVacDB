@@ -28,8 +28,14 @@ fuzz:
 		done; \
 	done
 
+# Crash and recovery tests with many more runs than `make test`:
+# thousands of seeded MemFS crash scenarios and real processes killed with
+# SIGKILL. Reproduce a failure with the seed it prints:
+#   NOVACDB_SEED=<seed> NOVACDB_CRASH_RUNS=1 go test -run CrashRecoveryMemFS ./tests/crash
+CRASH_RUNS ?= 3000
+OSKILL_RUNS ?= 30
 crashtest:
-	@echo "crashtest: crash test harness not built yet (arrives in Step 2.5)"
+	NOVACDB_CRASH_RUNS=$(CRASH_RUNS) NOVACDB_OSKILL_RUNS=$(OSKILL_RUNS) go test -count=1 -timeout 60m ./tests/crash/...
 
 sqltest:
 	@echo "sqltest: SQL logic test runner not built yet (arrives in Step 4.6)"

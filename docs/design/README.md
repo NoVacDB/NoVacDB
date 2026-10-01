@@ -15,4 +15,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [04](04-buffer-pool.md) | Buffer pool (`internal/storage`) | Implemented |
 | [05](05-heap-storage.md) | Slotted pages and heap tables (`internal/storage`) | Implemented |
 | [06](06-wal.md) | WAL writer and reader (`internal/wal`) | Implemented |
-| [07](07-checkpoints-recovery.md) | Logging heap changes, checkpoints, crash recovery (`internal/storage`, `internal/wal`) | Logging and checkpoints implemented; recovery in progress |
+| [07](07-checkpoints-recovery.md) | Logging heap changes, checkpoints, crash recovery (`internal/storage`, `internal/wal`) | Implemented |

@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 2.5 — Crash recovery and crash test harness** (design in `07-checkpoints-recovery.md`)
+👉 **Step 3.1 — Node format and search** (needs design doc `08-btree.md` approved first)
 
 ---
 
@@ -26,6 +26,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 2.2 WAL reader | ✅ Done | Sequential reader across segments sharing recovery's validation; torn tail = clean end, earlier damage = ErrCorrupt; boundary-checked start; FuzzReader; crash harness cross-checks reader vs recovery. |
 | 2026-10-01 | 2.3 Logging heap changes | ✅ Done | One physiological record per heap operation (two-page moves and grows atomic), full-page image on first change after the redo point, redo function, pool FlushWAL hook + PinForOverwrite, wal.Logger. Found and fixed a flush-path race. 11 deliberate-bug checks. |
 | 2026-10-01 | 2.4 Checkpoints | ✅ Done | Checkpointer (redo point, flush, sync, record, atomic control file, segment trimming), RedoStart. Found and fixed a lost-update race from 2.3 (pages now dirty before their record is appended). 10 deliberate-bug checks. |
+| 2026-10-01 | 2.5 Crash recovery and harness | ✅ Done | wal.Engine (open, recover, end-of-recovery checkpoint, logged heaps). tests/crash: MemFS harness checking recovered state is an exact operation prefix ≥ acknowledged, plus real SIGKILL test; `make crashtest`. Phase 2 complete. |
 
 ---
 
@@ -97,7 +98,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 **Scope:** Checkpoint record, flushing dirty pages, recording the redo start point, old WAL segment cleanup. Design doc `07-checkpoints-recovery.md`.
 **Acceptance:** Recovery after a checkpoint replays only what is needed; old segments removed safely.
 
-### 👉 Step 2.5 — Crash recovery and crash test harness
+### ✅ Step 2.5 — Crash recovery and crash test harness
 **Scope:** Redo recovery on startup. Crash test harness in `tests/crash/`: random operations, crash at random points with `MemFS`, recover, verify every acknowledged change is present and nothing partial is visible. Also an OS-level script that kills the real process. `make crashtest` wired up.
 **Acceptance:** Thousands of seeded crash runs pass; failing seeds are reproducible.
 
@@ -105,7 +106,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Phase 3 — B+Tree indexes
 
-### ⬜ Step 3.1 — Node format and search
+### 👉 Step 3.1 — Node format and search
 Node layout for internal and leaf pages, key encoding that sorts correctly as bytes, point lookup. Design doc `08-btree.md`.
 
 ### ⬜ Step 3.2 — Insert with splits
