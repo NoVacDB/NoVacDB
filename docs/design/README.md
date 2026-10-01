@@ -13,3 +13,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [02](02-page-format.md) | Page format (`internal/storage`) | Implemented |
 | [03](03-disk-manager.md) | Disk manager (`internal/storage`) | Implemented |
 | [04](04-buffer-pool.md) | Buffer pool (`internal/storage`) | Implemented |
+| [05](05-heap-storage.md) | Slotted pages and heap tables (`internal/storage`) | Implemented |

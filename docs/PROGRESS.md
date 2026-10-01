@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 1.4 — Slotted pages and heap tables** (needs design doc `05-heap-storage.md` approved first)
+👉 **Step 2.1 — WAL writer** (needs design doc `06-wal.md` approved first)
 
 ---
 
@@ -21,6 +21,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 1.1 Page format | ✅ Done | `internal/storage`: 8 KiB page, 24-byte header, CRC-32C Seal/Verify, 2 fuzz targets. Coverage 100%. |
 | 2026-10-01 | 1.2 Disk manager | ✅ Done | Dual header slots, free list, atomic Create, poisoned-on-error state. 1500 seeded crash runs, FuzzOpen. |
 | 2026-10-01 | 1.3 Buffer pool | ✅ Done | Clock replacement, PageRef pins and latches, copy-on-flush, WAL-rule hook. Model-based and concurrent tests. |
+| 2026-10-01 | 1.4 Slotted pages and heap | ✅ Done | Slotted page (insert/get/update/delete/compact), heap chain with in-memory FSM, scanner. Model-based, concurrent, crash-at-checkpoint tests; 2 fuzz targets; 16 deliberate-bug checks. |
 
 ---
 
@@ -67,7 +68,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 **Scope:** Fixed number of frames, page table, pin/unpin with pin counts, dirty tracking, Clock replacement, flush one / flush all, concurrency-safe. A hook (`flushedLSN` function) so the WAL rule can be enforced later. Design doc `04-buffer-pool.md`.
 **Acceptance:** Model-based tests; concurrent pin/unpin under `-race` with `-count=20`; error when all frames are pinned; eviction writes dirty pages.
 
-### 👉 Step 1.4 — Slotted pages and heap tables
+### ✅ Step 1.4 — Slotted pages and heap tables
 **Goal:** Store variable-length rows in pages.
 **Scope:** Slotted page layout (slot directory + tuple data), insert/get/update/delete, in-page compaction, record ID = (page ID, slot). Heap file spanning many pages with a simple free-space map. Full table scan iterator. Design doc `05-heap-storage.md`.
 **Acceptance:** Model-based tests with random inserts/updates/deletes of random sizes; rows survive reopen; fuzz target for slotted-page decoding.
@@ -76,7 +77,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Phase 2 — Write-ahead log and recovery
 
-### ⬜ Step 2.1 — WAL writer
+### 👉 Step 2.1 — WAL writer
 **Scope:** WAL record format (LSN, length, type, CRC-32C, payload), segment files, append, flush with `fsync`, current and flushed LSN tracking. Design doc `06-wal.md`.
 **Acceptance:** Records round-trip; segment rollover tested; flushed LSN only advances after `Sync`.
 
