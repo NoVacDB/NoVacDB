@@ -45,6 +45,10 @@ type Options struct {
 	// LSN is greater may not be written to disk. Nil means there is no WAL
 	// yet and any page may be written.
 	FlushedLSN func() uint64
+	// FlushWAL, if set, makes the WAL durable at least up to lsn. The pool
+	// calls it instead of failing when the WAL rule is all that stops it from
+	// evicting or flushing a page. It must not call back into the pool.
+	FlushWAL func(ctx context.Context, lsn uint64) error
 }
 
 // Stats are cumulative counters, for tests and later for metrics.
@@ -75,6 +79,7 @@ type frame struct {
 type BufferPool struct {
 	store      PageStore
 	flushedLSN func() uint64
+	flushWAL   func(ctx context.Context, lsn uint64) error
 
 	mu     sync.Mutex // guards table, free, hand, closed and frame metadata
 	frames []*frame
@@ -97,6 +102,7 @@ func NewBufferPool(store PageStore, opts Options) (*BufferPool, error) {
 	bp := &BufferPool{
 		store:      store,
 		flushedLSN: opts.FlushedLSN,
+		flushWAL:   opts.FlushWAL,
 		frames:     make([]*frame, opts.Frames),
 		table:      make(map[uint64]*frame, opts.Frames),
 		free:       make([]*frame, 0, opts.Frames),
@@ -182,7 +188,27 @@ func (bp *BufferPool) getFrame(ctx context.Context) (*frame, error) {
 		bp.free = bp.free[:n-1]
 		return f, nil
 	}
+	for attempt := 0; ; attempt++ {
+		f, walBlocked, err := bp.evict(ctx)
+		if f != nil || err != nil {
+			return f, err
+		}
+		// Every candidate was held back only by the WAL rule: force the log
+		// (once) and look again.
+		if walBlocked == 0 || bp.flushWAL == nil || attempt > 0 {
+			return nil, ErrNoFreeFrames
+		}
+		if err := bp.flushWAL(ctx, walBlocked); err != nil {
+			return nil, fmt.Errorf("forcing the wal to evict a page: %w", err)
+		}
+	}
+}
+
+// evict runs the Clock sweep. It returns the freed frame, or the highest LSN
+// among dirty pages that could not be written because of the WAL rule.
+func (bp *BufferPool) evict(ctx context.Context) (*frame, uint64, error) {
 	n := len(bp.frames)
+	var walBlocked uint64
 	// Two rounds: the first may only clear reference bits.
 	for range 2 * n {
 		f := bp.frames[bp.hand]
@@ -191,8 +217,11 @@ func (bp *BufferPool) getFrame(ctx context.Context) (*frame, error) {
 			continue
 		}
 		dirty := f.dirty.Load()
-		if dirty && !bp.lsnAllowed(pageLSN(f.data)) {
-			continue // WAL not durable far enough to write this page yet
+		if dirty {
+			if lsn := pageLSN(f.data); !bp.lsnAllowed(lsn) {
+				walBlocked = max(walBlocked, lsn)
+				continue // WAL not durable far enough to write this page yet
+			}
 		}
 		if f.refBit {
 			f.refBit = false // second chance
@@ -201,7 +230,7 @@ func (bp *BufferPool) getFrame(ctx context.Context) (*frame, error) {
 		if dirty {
 			// Unpinned means no one is using the bytes, so write in place.
 			if err := bp.store.WritePage(ctx, f.pageID, f.data); err != nil {
-				return nil, fmt.Errorf("evicting page %d: %w", f.pageID, err)
+				return nil, 0, fmt.Errorf("evicting page %d: %w", f.pageID, err)
 			}
 			f.dirty.Store(false)
 			bp.writes.Add(1)
@@ -209,9 +238,9 @@ func (bp *BufferPool) getFrame(ctx context.Context) (*frame, error) {
 		delete(bp.table, f.pageID)
 		f.valid = false
 		bp.evictions.Add(1)
-		return f, nil
+		return f, 0, nil
 	}
-	return nil, ErrNoFreeFrames
+	return nil, walBlocked, nil
 }
 
 // release returns an unused frame to the free list. Caller holds bp.mu.
@@ -291,6 +320,33 @@ func (bp *BufferPool) NewPage(ctx context.Context, t PageType) (*PageRef, error)
 	return bp.install(f, id), nil
 }
 
+// PinForOverwrite pins page id without reading it from the store: if the
+// page is not in memory a zeroed frame is installed for it. It is for callers
+// that replace the whole page at once (redo of a full-page image), which is
+// how a page whose copy on disk is torn gets rebuilt. The caller must
+// overwrite the page under the exclusive latch and unpin it dirty.
+func (bp *BufferPool) PinForOverwrite(ctx context.Context, id uint64) (*PageRef, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	if bp.closed {
+		return nil, ErrPoolClosed
+	}
+	if f, ok := bp.table[id]; ok {
+		f.pinCount++
+		f.refBit = true
+		return &PageRef{pool: bp, f: f, id: id}, nil
+	}
+	f, err := bp.getFrame(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pinning page %d for overwrite: %w", id, err)
+	}
+	clear(f.data)
+	return bp.install(f, id), nil
+}
+
 // DeletePage frees page id in the store and drops it from the pool without
 // writing it. The page must not be pinned.
 func (bp *BufferPool) DeletePage(ctx context.Context, id uint64) error {
@@ -355,14 +411,25 @@ func (bp *BufferPool) writeFrame(ctx context.Context, f *frame, id uint64) error
 	scratch := make([]byte, PageSize)
 	f.latch.RLock()
 	copy(scratch, f.data)
-	if lsn := pageLSN(scratch); !bp.lsnAllowed(lsn) {
-		f.latch.RUnlock()
-		return fmt.Errorf("flushing page %d with lsn %d: %w", id, lsn, ErrWALRule)
-	}
 	// Clear dirty at copy time: a later change re-dirties the page, so it
 	// can cost an extra write but never lose a change.
 	f.dirty.Store(false)
 	f.latch.RUnlock()
+	// The copy is what gets written, so it is the copy's LSN that the log
+	// must cover. (Re-reading the live page instead would chase a moving
+	// target under concurrent writers.)
+	if lsn := pageLSN(scratch); !bp.lsnAllowed(lsn) {
+		if bp.flushWAL != nil {
+			if err := bp.flushWAL(ctx, lsn); err != nil {
+				f.dirty.Store(true)
+				return fmt.Errorf("forcing the wal to flush page %d: %w", id, err)
+			}
+		}
+		if !bp.lsnAllowed(lsn) {
+			f.dirty.Store(true)
+			return fmt.Errorf("flushing page %d with lsn %d: %w", id, lsn, ErrWALRule)
+		}
+	}
 	if err := bp.store.WritePage(ctx, id, scratch); err != nil {
 		f.dirty.Store(true)
 		return fmt.Errorf("flushing page %d: %w", id, err)

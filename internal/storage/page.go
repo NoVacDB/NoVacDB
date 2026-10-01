@@ -184,6 +184,9 @@ func Verify(buf []byte, wantID uint64) error {
 	return nil
 }
 
+// setPageLSN stamps a page with the LSN of the last record that changed it.
+func setPageLSN(buf []byte, lsn uint64) { binary.LittleEndian.PutUint64(buf[offLSN:], lsn) }
+
 // Payload returns the part of buf after the header, aliasing buf.
 func Payload(buf []byte) ([]byte, error) {
 	if err := checkSize(buf); err != nil {

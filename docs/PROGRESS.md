@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 2.3 — Logging heap changes** (design in `07-checkpoints-recovery.md`)
+👉 **Step 2.4 — Checkpoints** (design in `07-checkpoints-recovery.md`)
 
 ---
 
@@ -24,6 +24,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 1.4 Slotted pages and heap | ✅ Done | Slotted page (insert/get/update/delete/compact), heap chain with in-memory FSM, scanner. Model-based, concurrent, crash-at-checkpoint tests; 2 fuzz targets; 16 deliberate-bug checks. |
 | 2026-10-01 | 2.1 WAL writer | ✅ Done | `internal/wal`: record + segment formats, Append/Flush/FlushTo, durable-end tracking, open-time tail recovery, buffer-pool hook (`FlushedLSN`). Found and fixed a durability bug via the crash test's process-kill mode. 20 deliberate-bug checks. |
 | 2026-10-01 | 2.2 WAL reader | ✅ Done | Sequential reader across segments sharing recovery's validation; torn tail = clean end, earlier damage = ErrCorrupt; boundary-checked start; FuzzReader; crash harness cross-checks reader vs recovery. |
+| 2026-10-01 | 2.3 Logging heap changes | ✅ Done | One physiological record per heap operation (two-page moves and grows atomic), full-page image on first change after the redo point, redo function, pool FlushWAL hook + PinForOverwrite, wal.Logger. Found and fixed a flush-path race. 11 deliberate-bug checks. |
 
 ---
 
@@ -87,11 +88,11 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 **Scope:** Sequential reader across segments, detection of torn or corrupt tail records (stop cleanly at the last valid record).
 **Acceptance:** Torn-write crash tests with `MemFS`; fuzz target for record decoding.
 
-### 👉 Step 2.3 — Logging heap changes
+### ✅ Step 2.3 — Logging heap changes
 **Scope:** Every heap change writes a WAL record first; pages carry the LSN of their last change; buffer pool enforces the WAL rule before evicting or flushing a page.
 **Acceptance:** Tests prove no page reaches disk before its WAL record is durable.
 
-### ⬜ Step 2.4 — Checkpoints
+### 👉 Step 2.4 — Checkpoints
 **Scope:** Checkpoint record, flushing dirty pages, recording the redo start point, old WAL segment cleanup. Design doc `07-checkpoints-recovery.md`.
 **Acceptance:** Recovery after a checkpoint replays only what is needed; old segments removed safely.
 

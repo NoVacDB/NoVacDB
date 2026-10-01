@@ -38,6 +38,7 @@ type heapPage struct {
 type Heap struct {
 	bp    *BufferPool
 	first uint64
+	lg    Logger // nil: changes are not logged (Step 1.4 behaviour)
 
 	// growMu serialises appending pages so there is only ever one tail.
 	// Lock order: growMu -> page latch -> mu.
@@ -80,18 +81,35 @@ func withPage(ctx context.Context, bp *BufferPool, id uint64, write bool, fn fun
 	return err
 }
 
+// HeapOption configures a heap.
+type HeapOption func(*Heap)
+
+// WithLogger makes every change to the heap go through the write-ahead log:
+// each operation becomes one log record, pages carry the LSN of their last
+// change, and operations on two pages are atomic. A logged heap needs a
+// buffer pool of at least two frames. See docs/design/07-checkpoints-recovery.md.
+func WithLogger(lg Logger) HeapOption { return func(h *Heap) { h.lg = lg } }
+
 // CreateHeap allocates the first page of a new, empty heap.
-func CreateHeap(ctx context.Context, bp *BufferPool) (*Heap, error) {
-	id, err := newHeapPage(ctx, bp)
+func CreateHeap(ctx context.Context, bp *BufferPool, opts ...HeapOption) (*Heap, error) {
+	h := &Heap{bp: bp, index: map[uint64]int{}}
+	for _, o := range opts {
+		o(h)
+	}
+	var id uint64
+	var err error
+	if h.lg != nil {
+		id, err = h.newLoggedHeapPage(ctx)
+	} else {
+		id, err = newHeapPage(ctx, bp)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("creating heap: %w", err)
 	}
-	return &Heap{
-		bp:    bp,
-		first: id,
-		pages: []heapPage{{id: id, free: MaxTupleSize}},
-		index: map[uint64]int{id: 0},
-	}, nil
+	h.first = id
+	h.pages = []heapPage{{id: id, free: MaxTupleSize}}
+	h.index[id] = 0
+	return h, nil
 }
 
 // newHeapPage allocates and initialises an empty heap page, leaving it dirty
@@ -118,8 +136,11 @@ func newHeapPage(ctx context.Context, bp *BufferPool) (uint64, error) {
 
 // OpenHeap opens the heap whose first page is first. It reads the whole
 // chain, fully validating every page, and rebuilds the free-space map.
-func OpenHeap(ctx context.Context, bp *BufferPool, first uint64) (*Heap, error) {
+func OpenHeap(ctx context.Context, bp *BufferPool, first uint64, opts ...HeapOption) (*Heap, error) {
 	h := &Heap{bp: bp, first: first, index: map[uint64]int{}}
+	for _, o := range opts {
+		o(h)
+	}
 	for id := first; id != 0; {
 		if _, seen := h.index[id]; seen {
 			return nil, fmt.Errorf("opening heap at page %d: chain loops back to page %d: %w", first, id, ErrCorruptHeap)
@@ -195,6 +216,9 @@ func (h *Heap) grow(ctx context.Context, size int) error {
 	if _, ok := h.pickPage(size); ok {
 		return nil
 	}
+	if h.lg != nil {
+		return h.growLogged(ctx)
+	}
 	newID, err := newHeapPage(ctx, h.bp)
 	if err != nil {
 		return fmt.Errorf("growing heap: %w", err)
@@ -234,9 +258,15 @@ func (h *Heap) Insert(ctx context.Context, data []byte) (RID, error) {
 		}
 		var slot int
 		err := withPage(ctx, h.bp, id, true, func(sp *SlottedPage) (bool, error) {
+			before := h.snapshot(sp)
 			s, err := sp.Insert(data)
 			h.setFree(id, sp.FreeSpace()) // refresh the hint whatever happened
 			if err != nil {
+				return false, err
+			}
+			if err := h.logChanges(ctx, change{sp: sp, id: id, before: before,
+				op: HeapBlock{Page: id, Kind: BlockInsert, Slot: uint16(s), Data: data}}); err != nil {
+				h.setFree(id, sp.FreeSpace())
 				return false, err
 			}
 			slot = s
@@ -279,7 +309,12 @@ func (h *Heap) Delete(ctx context.Context, rid RID) error {
 		return err
 	}
 	err := withPage(ctx, h.bp, rid.Page, true, func(sp *SlottedPage) (bool, error) {
+		before := h.snapshot(sp)
 		if err := sp.Delete(int(rid.Slot)); err != nil {
+			return false, err
+		}
+		if err := h.logChanges(ctx, change{sp: sp, id: rid.Page, before: before,
+			op: HeapBlock{Page: rid.Page, Kind: BlockDelete, Slot: rid.Slot}}); err != nil {
 			return false, err
 		}
 		h.setFree(rid.Page, sp.FreeSpace())
@@ -303,17 +338,29 @@ func (h *Heap) Update(ctx context.Context, rid RID, data []byte) (RID, error) {
 		return RID{}, err
 	}
 	err := withPage(ctx, h.bp, rid.Page, true, func(sp *SlottedPage) (bool, error) {
+		before := h.snapshot(sp)
 		err := sp.Update(int(rid.Slot), data)
 		if err == nil || errors.Is(err, ErrNoSpace) {
 			h.setFree(rid.Page, sp.FreeSpace())
 		}
-		return err == nil, err
+		if err != nil {
+			return false, err
+		}
+		if err := h.logChanges(ctx, change{sp: sp, id: rid.Page, before: before,
+			op: HeapBlock{Page: rid.Page, Kind: BlockUpdate, Slot: rid.Slot, Data: data}}); err != nil {
+			h.setFree(rid.Page, sp.FreeSpace())
+			return false, err
+		}
+		return true, nil
 	})
 	if err == nil {
 		return rid, nil
 	}
 	if !errors.Is(err, ErrNoSpace) {
 		return RID{}, fmt.Errorf("updating row %s: %w", rid, err)
+	}
+	if h.lg != nil {
+		return h.moveLogged(ctx, rid, data)
 	}
 
 	// Does not fit on its page: insert the new version first, then retire the
