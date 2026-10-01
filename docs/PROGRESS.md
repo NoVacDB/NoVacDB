@@ -17,6 +17,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | Date | Step | Result | Notes |
 |---|---|---|---|
 | 2026-10-01 | 0.1 Project skeleton | ✅ Done | Module, `cmd/novacdb`, Makefile, golangci config, CI workflow, `.gitignore`, design index. Full check loop green. |
+| 2026-10-01 | 0.2 Virtual file system | ✅ Done | `internal/vfs`: OSFS, MemFS with durable/volatile model, Crash with torn last write, fault injection. Coverage 97.2%. |
 
 ---
 
