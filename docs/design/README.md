@@ -9,4 +9,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 
 | Doc | Component | Status |
 |---|---|---|
-| [01](01-vfs.md) | Virtual file system (`internal/vfs`) | Draft |
+| [01](01-vfs.md) | Virtual file system (`internal/vfs`) | Implemented |

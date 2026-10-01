@@ -1,6 +1,6 @@
 # 01 — Virtual File System (`internal/vfs`)
 
-Status: **Draft, awaiting approval**
+Status: **Approved and implemented (Step 0.2)**
 
 ## 1. Problem
 
@@ -37,7 +37,7 @@ Choices:
 
 - **Offset-based I/O only** (`ReadAt`/`WriteAt`). Pages and WAL records are addressed by offset, so there is no shared cursor and no seek state to get wrong. Concurrent reads and writes at different offsets are safe.
 - **Small flag set** instead of `os` flag bits, so `MemFS` does not need to emulate everything `os` supports.
-- **Sentinel errors**: `ErrNotExist`, `ErrExist`, `ErrClosed`, `ErrInjected`. `OSFS` maps `os` errors onto these with `%w`, so tests behave the same on both.
+- **Sentinel errors**: `ErrNotExist`, `ErrExist`, `ErrClosed`, `ErrInjected`, plus (added during implementation) `ErrIsDir`, `ErrInvalid`, `ErrPermission` (operation not allowed by the open flags, enforced identically by both implementations) and `ErrFileTooLarge`. `OSFS` maps `os` errors onto these with `%w`, so tests behave the same on both.
 - **Paths** are slash-separated and cleaned with `path/filepath` in `OSFS`. `MemFS` treats them as opaque cleaned strings in a flat map plus a set of directories.
 
 ### MemFS durability model
@@ -65,6 +65,13 @@ flowchart LR
     V -- "Crash" --> X["dropped (or random prefix of last write if TearLast)"]
     D -- "Crash" --> K["kept"]
 ```
+
+### Implementation notes (differences from the first draft)
+
+- `Remove` deletes files only; removing a directory returns `ErrIsDir` on both implementations.
+- `SyncDir(dir)` also makes immediate subdirectory creation and removal durable. A directory whose own parent was never synced loses its files on `Crash`.
+- API: `NewMemFS(seed)`, `Crash(CrashOptions{TearLast})`, `InjectError(Fault{Op, Name, After})` (one-shot), `ClearFaults()`.
+- Handles opened before a `Crash` return `ErrClosed`; a handle on a removed file keeps working until closed, as on POSIX.
 
 ## 3. Formats
 

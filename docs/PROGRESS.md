@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 0.2 — Virtual file system (`internal/vfs`)** (needs design doc `01-vfs.md` approved first)
+👉 **Step 1.1 — Page format** (needs design doc `02-page-format.md` approved first)
 
 ---
 
@@ -35,7 +35,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 - `docs/design/README.md` — index of design docs
 **Acceptance:** `make build`, `make test`, `make lint` all pass; `go mod tidy` leaves `go.mod` unchanged; the binary runs and exits cleanly.
 
-### 👉 Step 0.2 — Virtual file system (`internal/vfs`)
+### ✅ Step 0.2 — Virtual file system (`internal/vfs`)
 **Goal:** Every file operation goes through one interface, so tests can simulate crashes.
 **Scope:**
 - `FS` and `File` interfaces (open, create, read at, write at, sync, truncate, size, close, remove, rename, list, sync directory)
@@ -48,7 +48,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Phase 1 — Storage
 
-### ⬜ Step 1.1 — Page format
+### 👉 Step 1.1 — Page format
 **Goal:** Fixed 8 KiB pages with a header and checksum.
 **Scope:** Page header (page ID, LSN, CRC-32C, page type, flags), encode/decode, checksum compute and verify, page type constants. Design doc `02-page-format.md`.
 **Acceptance:** Round-trip tests; corrupted bytes detected; fuzz target for the decoder runs 30s without failures.

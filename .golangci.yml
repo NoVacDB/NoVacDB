@@ -41,6 +41,9 @@ linters:
       # main may write usage/errors to its injected writer.
       - path: cmd/novacdb/
         linters: [forbidigo]
+      # Test cleanup (Close in defer) failures are not interesting.
+      - path: _test\.go
+        linters: [errcheck]
 
 formatters:
   enable:
