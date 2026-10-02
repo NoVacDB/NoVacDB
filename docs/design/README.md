@@ -17,3 +17,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [06](06-wal.md) | WAL writer and reader (`internal/wal`) | Implemented |
 | [07](07-checkpoints-recovery.md) | Logging heap changes, checkpoints, crash recovery (`internal/storage`, `internal/wal`) | Implemented |
 | [08](08-btree.md) | B+Tree indexes (`internal/btree`, `internal/wal`) | Implemented |
+| [09](09-sql-frontend.md) | SQL lexer, parser and errors (`internal/sql/parser`, `internal/sql/sqlerr`) | In progress (4.1 implemented) |

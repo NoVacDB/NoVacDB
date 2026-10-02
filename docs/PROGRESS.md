@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 4.1 — Lexer**
+👉 **Step 4.2 — Parser and AST** (design in `09-sql-frontend.md`)
 
 ---
 
@@ -32,6 +32,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-01 | 3.3 Delete with merge and redistribution | ✅ Done | Latch crabbing (only the unsafe part of the path stays latched; 1.01 latches at the leaf on average), bottom-up merge or redistribution with a sibling, in-place root collapse, freed pages reused. Found and fixed a latch leak in root collapse. Model tests (3.9M mixed operations in a long run), every repair path counted and required, crash-leftover shapes, corrupt trees. 34 deliberate-bug checks (3 equivalent). |
 | 2026-10-01 | 3.4 Range scans | ✅ Done | Iterator with inclusive/exclusive/unbounded bounds that holds nothing between calls: it copies one leaf per descent and finds the next leaf through the upper fence, so leaves need no sibling links (the plan's "leaf chains" replaced, see 08-btree.md). One descent per leaf; strictly increasing keys under concurrent writes. 17 deliberate-bug checks (1 equivalent). |
 | 2026-10-01 | 3.5 Concurrency, WAL, and crash safety | ✅ Done | WAL record type 3 (leaf operations physiologically, structural changes as page images), rollback on log failure, deferred frees released by checkpoints, `Engine.CreateBTree`/`OpenBTree` and replay. Concurrent writers, readers and scanners under `-race` (20 repetitions); crash harness extended with a three-level B+Tree (3,000 MemFS scenarios, 30 SIGKILL runs); benchmarks recorded in `08-btree.md`; `make stress`. 33 deliberate-bug checks. Phase 3 complete. |
+| 2026-10-02 | 4.1 Lexer | ✅ Done | Design doc `09-sql-frontend.md` (lexer, parser, errors). `internal/sql/sqlerr` (SQLSTATE errors with character positions and hints) and the lexer in `internal/sql/parser`: PostgreSQL identifier folding and quoting, keyword categories, standard/escape/dollar-quoted strings with newline continuation, PostgreSQL 16 number forms with trailing-junk errors, parameters, operator cutting, nested comments. Names over 63 bytes are rejected, not truncated. FuzzLex; 33 deliberate-bug checks (2 equivalent). |
 
 ---
 
@@ -132,10 +133,10 @@ Latch crabbing for concurrent access, WAL logging of index changes, crash tests.
 
 ## Phase 4 — SQL
 
-### 👉 Step 4.1 — Lexer
+### ✅ Step 4.1 — Lexer
 Tokens for keywords, identifiers (PostgreSQL case rules), string and numeric literals, operators, comments. Fuzz target.
 
-### ⬜ Step 4.2 — Parser and AST
+### 👉 Step 4.2 — Parser and AST
 `CREATE TABLE`, `DROP TABLE`, `CREATE INDEX`, `INSERT`, `SELECT ... WHERE ... ORDER BY ... LIMIT`, `UPDATE`, `DELETE`. Clear syntax errors with position. Fuzz target. Design doc `09-sql-frontend.md`.
 
 ### ⬜ Step 4.3 — Types and values
