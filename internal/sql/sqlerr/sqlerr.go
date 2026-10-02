@@ -56,6 +56,8 @@ const (
 	ObjectNotInPrerequisiteState = "55000"
 	QueryCanceled                = "57014"
 	IOError                      = "58030"
+	ProtocolViolation            = "08P01"
+	InvalidAuthorization         = "28000"
 	InternalError                = "XX000"
 	DataCorrupted                = "XX001"
 )

@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 5.1 — Startup and authentication** (Phase 5)
+👉 **Step 5.2 — Simple query protocol** (design in `12-wire-protocol.md`)
 
 ---
 
@@ -39,6 +39,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-02 | 4.5 Executor | ✅ Done | `internal/sql/executor`: `Open`/`Exec`/`Close`, binding with PostgreSQL's type resolution and error codes, functions, sequential and index scans (planner picks the longest equality prefix plus a range), sort, DISTINCT, LIMIT/OFFSET, two-phase INSERT/UPDATE/DELETE with NOT NULL and end-of-statement uniqueness, DDL, self-restart after failures, checkpoints by WAL growth. Index plans checked against sequential plans on random data (3000 queries × 31 seeds) and by a randomized statement generator (600k statements, 150 seeds); I/O fault at every point of six statement kinds; fuzz target; 73 deliberate-bug checks (4 equivalent); coverage 96%. |
 | 2026-10-02 | 4.6 SQL logic tests | ✅ Done | `tests/sqllogic`: dependency-free runner for a sqllogictest dialect (statement ok/error with SQLSTATE and message, typed queries with sort modes, `restart` and `crash` directives), 7 files with 250 records covering every supported statement, `make sqltest`. Writing expectations from PostgreSQL's behaviour found two differences, fixed: `true::text` and the aliased-table error. `tests/crash/sql_test.go`: multi-row statements and DDL all-or-nothing across kills, power cuts and torn writes, including crashes in the middle of a statement (4000 scenarios, ~197k statements, ~9.9k crashes, all matched). Design doc `11-sql-logic-tests.md`. |
 | 2026-10-02 | B+Tree revision 2 (review) | ✅ Done | Design doc 08 revised first and approved. Leaf cells gain a Flags byte (zero until Phase 6's delete marks), data file format version 2. Deferred frees are logged (WAL type 6), logged again by checkpoints and replayed by recovery, so they survive crashes; a scavenger is on the roadmap for the remaining leak windows. Every index entry, unique or not, now carries the RID; uniqueness by prefix probe. Deadlock-freedom argument corrected (repairs latch a left sibling after the node); new test aimed at left-sibling repairs under `-race` with a watchdog. A checkpoint failing at every write, sync and rename point never frees a page twice or a live page. Limitations and Phase 4 notes added. |
+| 2026-10-02 | 5.1 Startup and authentication | ✅ Done | Design doc `12-wire-protocol.md` (whole of Phase 5, reviewed and approved). `internal/pgwire`: framing with size limits (startup 10,000 bytes, messages 16 MiB, large bodies allocated as they arrive), startup packet, backend messages. `internal/server`: one goroutine per connection, SSL/GSS requests declined, protocol 3.0 with negotiation down from 3.x, PostgreSQL's startup-parameter rules, trust authentication, ParameterStatus, cancel keys, startup timeout, panic containment. `novacdb` now opens the database and serves on localhost:5433, stopping cleanly on SIGINT/SIGTERM. Verified with real `psql` 16 and `pg_isready`. Coverage 93% / 99%; 2 fuzz targets; 35 deliberate-bug checks, all caught. |
 
 ---
 
@@ -161,10 +162,10 @@ In-house sqllogictest runner (no dependencies), initial test files covering ever
 
 ## Phase 5 — PostgreSQL wire protocol (MVP)
 
-### 👉 Step 5.1 — Startup and authentication
+### ✅ Step 5.1 — Startup and authentication
 TCP listener, `SSLRequest`/`GSSENCRequest` declined, startup message, trust authentication, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`. Design doc `12-wire-protocol.md`.
 
-### ⬜ Step 5.2 — Simple query protocol
+### 👉 Step 5.2 — Simple query protocol
 `Query` → `RowDescription`, `DataRow`, `CommandComplete`, `ErrorResponse` with correct SQLSTATE codes, `EmptyQueryResponse`. Type OIDs for supported types.
 
 ### ⬜ Step 5.3 — Extended query protocol

@@ -1,6 +1,6 @@
 # 12 — PostgreSQL Wire Protocol (`internal/pgwire`, `internal/server`)
 
-Status: **Designed for Phase 5 (Steps 5.1–5.4); awaiting review.** Step 5.1 (startup and authentication) is designed in full here. Steps 5.2–5.4 are outlined in section 2.6 so that 5.1's choices fit them, and are detailed in this document when their step starts.
+Status: **Designed for Phase 5 (Steps 5.1–5.4); approved. Implemented so far: 5.1.** Step 5.1 (startup and authentication) is designed in full here. Steps 5.2–5.4 are outlined in section 2.6 so that 5.1's choices fit them, and are detailed in this document when their step starts.
 
 ## 1. Problem
 
@@ -57,7 +57,7 @@ At most two encryption requests (one of each kind) are accepted before the start
 - **`user`** is required: missing or empty is `FATAL 28000` "no PostgreSQL user name specified in startup packet".
 - **`database`** defaults to the user name. NoVacDB has one database per data directory, so **any database name is accepted** (decision: rejecting names would make plain `psql -h localhost -p 5433` fail, since `psql` asks for a database named after the OS user). The name is kept for the session and logged.
 - **`application_name`**: kept, reported back, and logged. At most 63 bytes (PostgreSQL truncates; so does NoVacDB).
-- **`client_encoding`**: `UTF8` (any case, with or without the hyphen, or `UNICODE`) is accepted. Anything else is `FATAL 22023` `invalid value for parameter "client_encoding": "LATIN1"`: NoVacDB stores and sends only UTF-8, and has no conversions.
+- **`client_encoding`**: `UTF8` (any case, with or without the hyphen, or `UNICODE`) is accepted, and so is `SQL_ASCII`, which PostgreSQL also accepts with a UTF-8 server: it means "no conversion", and libpq sends it from terminals in the C locale (found while implementing: refusing it would stop `psql` from connecting there). Anything else is `FATAL 22023` `invalid value for parameter "client_encoding": "LATIN1"`: NoVacDB stores and sends only UTF-8, and has no conversions.
 - **`DateStyle`**: accepted if it is ISO output (`ISO`, `ISO, MDY`, `ISO, DMY`, `ISO, YMD`, any case and spacing); reported as `ISO, MDY`. Otherwise `FATAL 22023`.
 - **`TimeZone`**: accepted if it names UTC (`UTC`, `Etc/UTC`, `GMT`, `Etc/GMT`, `Z`, `+00`, `0`); anything else is `FATAL 0A000` "time zone "Europe/Berlin" is not supported yet: the session time zone is always UTC" (10-executor.md section 8). Drivers that send the JVM's time zone (pgjdbc) need `-Duser.timezone=UTC` until time zones arrive.
 - **`extra_float_digits`**: accepted (any integer −15..3) and ignored: NoVacDB always prints the shortest exact form, which is what PostgreSQL prints for values ≥ 1, the default since PostgreSQL 12.
@@ -105,6 +105,14 @@ Only `Terminate` (`X`) is fully handled: the server closes the connection. A `Qu
 - **5.2 Simple query.** `Query` runs `executor.DB.Exec` statement by statement: `RowDescription` (column names, type OIDs: `int4` 23, `int8` 20, `float8` 701, `text` 25, `bool` 16, `timestamptz` 1184; text format), `DataRow`s in the text output form, `CommandComplete` with the tag, `NoticeResponse` for notices, `EmptyQueryResponse` for an empty string, then `ReadyForQuery`. An error stops the rest of the string, as PostgreSQL's implicit transaction does (except that earlier statements stay committed: 10-executor.md section 5). Rows are streamed in batches rather than built whole (needs an executor cursor API; designed in 5.2).
 - **5.3 Extended query.** `Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`, named and unnamed statements and portals, text-format parameters (`$1` binds as an untyped literal of the parameter's declared or inferred type), binary result formats for the six types. Errors skip to `Sync`.
 - **5.4 Connections.** A connection limit (`--max-connections`, default 1000: goroutines are cheap; problem #12/#13 in WORKFLOW.md), `CancelRequest` (cancels the target connection's statement context; a cancelled write that has begun applying still finishes, 10-executor.md section 2.4), idle and startup timeouts, and graceful shutdown: stop accepting, let running statements finish up to a deadline, send `FATAL 57P01` "terminating connection due to administrator command", close the database (final checkpoint).
+
+### 2.7 Implementation notes (Step 5.1)
+
+- **`SQL_ASCII` client encoding** is accepted (2.3), a change from the reviewed design: libpq sends it from terminals in the C locale, and PostgreSQL accepts it.
+- **Large message bodies grow as they arrive.** A body up to 64 KiB is allocated at once; a larger one is read into a buffer that grows with the bytes received, so announcing 16 MiB and stalling costs nothing.
+- **Startup errors come before `AuthenticationOk`.** PostgreSQL checks startup settings after authentication; with trust authentication the difference is invisible to clients, and refusing early sends less.
+- **The cancel request code is protocol "1234.5678".** A version check that looked only at the major number would treat it as protocol 1234; the startup loop recognises the three request codes first, so the tests' "unsupported protocol" cases use 1234.5677.
+- **Verified with real clients:** `psql` 16 connects (with `sslmode=prefer`, after the declined `SSLRequest`), shows the 5.1 query error, and `\conninfo` reports the database and user; `pg_isready` reports "accepting connections"; a refused `TimeZone` setting is shown as the server's `FATAL`; the server stops cleanly on SIGTERM. An integration test runs `psql` whenever it is installed.
 
 ## 3. Formats
 
