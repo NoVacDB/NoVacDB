@@ -30,7 +30,7 @@ func (st *stmt) table(name ast.Name) (*catalog.Table, error) {
 // rowBinder returns a binder over a table's columns, under its alias if
 // it has one.
 func (st *stmt) rowBinder(tbl *catalog.Table, ref *ast.TableRef) *binder {
-	b := &binder{sql: st.sql, table: tbl, name: ref.Name.Name}
+	b := &binder{sql: st.sql, table: tbl, name: ref.Name.Name, params: st.params}
 	if ref.Alias.Name != "" {
 		b.name = ref.Alias.Name
 	}
@@ -59,7 +59,7 @@ type sortKey struct {
 }
 
 func (st *stmt) selectStmt(s *ast.Select) (*Result, error) {
-	b := &binder{sql: st.sql}
+	b := st.binder()
 	var tbl *catalog.Table
 	if s.From != nil {
 		var err error
@@ -147,6 +147,9 @@ func (st *stmt) selectStmt(s *ast.Select) (*Result, error) {
 	limit, offset, err := st.limits(s)
 	if err != nil {
 		return nil, err
+	}
+	if st.describe {
+		return &Result{Columns: cols}, nil
 	}
 
 	// Run: scan and filter, project and compute sort keys, then DISTINCT,
@@ -317,7 +320,7 @@ func distinctKey(vals []types.Value) string {
 func (st *stmt) limits(s *ast.Select) (limit, offset int64, err error) {
 	limit = -1
 	eval := func(e ast.Expr, what string, code string) (int64, bool, error) {
-		b := &binder{sql: st.sql, noVars: func() *sqlerr.Error {
+		b := &binder{sql: st.sql, params: st.params, noVars: func() *sqlerr.Error {
 			return sqlerr.New(sqlerr.InvalidColumnReference, "argument of %s must not contain variables", what)
 		}}
 		n, err := b.bind(e)
@@ -329,6 +332,9 @@ func (st *stmt) limits(s *ast.Select) (limit, offset int64, err error) {
 		}
 		if !n.typ().IsNumeric() {
 			return 0, false, sqlerr.New(sqlerr.DatatypeMismatch, "argument of %s must be type bigint, not type %s", what, n.typ()).At(st.sql, e.Pos())
+		}
+		if st.describe {
+			return 0, false, nil // a parameter has no value yet
 		}
 		v, err := (&castNode{x: n, to: types.Int8}).eval(st.ec, nil)
 		if err != nil || v.Null {

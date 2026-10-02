@@ -159,7 +159,7 @@ func (db *DB) Exec(ctx context.Context, sql string) ([]*Result, error) {
 	}
 	var results []*Result
 	for _, s := range stmts {
-		r, err := db.exec(ctx, sql, s)
+		r, err := db.run(ctx, sql, s, nil, false)
 		if err != nil {
 			return results, err
 		}
@@ -172,9 +172,12 @@ func canceled(err error) *sqlerr.Error {
 	return sqlerr.Wrap(err, sqlerr.QueryCanceled, "canceling statement due to user request")
 }
 
-// exec runs one statement under the database lock.
-func (db *DB) exec(ctx context.Context, sql string, s ast.Stmt) (*Result, error) {
-	if _, ok := s.(*ast.Select); ok {
+// run runs one statement under the database lock, with its parameters if
+// it has any. With describe set it only binds the statement, to learn its
+// parameters' types and result columns: nothing is read or changed, and a
+// statement that is not a query or a row change is not looked at.
+func (db *DB) run(ctx context.Context, sql string, s ast.Stmt, ps *params, describe bool) (*Result, error) {
+	if _, ok := s.(*ast.Select); ok || describe {
 		db.mu.RLock()
 		defer db.mu.RUnlock()
 	} else {
@@ -190,9 +193,15 @@ func (db *DB) exec(ctx context.Context, sql string, s ast.Stmt) (*Result, error)
 	if err := ctx.Err(); err != nil {
 		return nil, canceled(err)
 	}
-	st := &stmt{db: db, ctx: ctx, sql: sql, ec: &evalCtx{now: types.TimestampFromTime(db.opts.Now())}}
+	st := &stmt{db: db, ctx: ctx, sql: sql, ec: &evalCtx{now: types.TimestampFromTime(db.opts.Now())}, params: ps, describe: describe}
 	var r *Result
 	var err error
+	switch s.(type) {
+	case *ast.CreateTable, *ast.DropTable, *ast.CreateIndex, *ast.DropIndex:
+		if describe {
+			return &Result{}, nil
+		}
+	}
 	switch s := s.(type) {
 	case *ast.Select:
 		r, err = st.selectStmt(s)
@@ -245,11 +254,17 @@ func isCorruption(err error) bool {
 
 // stmt is one statement being run.
 type stmt struct {
-	db  *DB
-	ctx context.Context
-	sql string
-	ec  *evalCtx
+	db       *DB
+	ctx      context.Context
+	sql      string
+	ec       *evalCtx
+	params   *params // nil for a statement without parameters
+	describe bool    // bind only: see run
 }
+
+// binder returns a binder for the statement's expressions that see no
+// table.
+func (st *stmt) binder() *binder { return &binder{sql: st.sql, params: st.params} }
 
 // tooMuch is the error for a statement that changes more pages than the
 // buffer pool holds.

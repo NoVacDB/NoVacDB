@@ -9,17 +9,21 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/pgwire"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/server"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/executor"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/parser"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/types"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
 )
 
@@ -31,9 +35,20 @@ type wireSession struct {
 	srv *server.Server
 	c   net.Conn
 	rd  *pgwire.Reader
+	// extended sends each single statement through Parse, Bind, Describe
+	// and Execute, with binary results.
+	extended bool
 }
 
 func openWire(ctx context.Context, fsys vfs.FS, dir string, opts executor.Options) (Session, error) {
+	return open(ctx, fsys, dir, opts, false)
+}
+
+func openExtended(ctx context.Context, fsys vfs.FS, dir string, opts executor.Options) (Session, error) {
+	return open(ctx, fsys, dir, opts, true)
+}
+
+func open(ctx context.Context, fsys vfs.FS, dir string, opts executor.Options, extended bool) (Session, error) {
 	db, err := executor.Open(ctx, fsys, dir, opts)
 	if err != nil {
 		return nil, err
@@ -51,7 +66,7 @@ func openWire(ctx context.Context, fsys vfs.FS, dir string, opts executor.Option
 	if err != nil {
 		return nil, err
 	}
-	w := &wireSession{db: db, srv: srv, c: c, rd: pgwire.NewReader(bufio.NewReader(c))}
+	w := &wireSession{db: db, srv: srv, c: c, rd: pgwire.NewReader(bufio.NewReader(c)), extended: extended}
 	_ = c.SetDeadline(time.Now().Add(time.Minute))
 	if _, err := c.Write(pgwire.EncodeStartup(pgwire.ProtocolVersion30, []pgwire.Param{{Name: "user", Value: "tester"}})); err != nil {
 		return nil, err
@@ -77,12 +92,34 @@ var oidLetter = map[uint32]byte{
 	pgwire.OIDText: 'T', pgwire.OIDBool: 'B', pgwire.OIDTimestampTZ: 'D',
 }
 
-// readUntilReady collects the results of one Query, as the server sends
-// them, up to ReadyForQuery.
+// binaryValue decodes a binary result value of a type OID.
+func binaryValue(oid uint32, b []byte) (types.Value, error) {
+	be := binary.BigEndian
+	switch {
+	case oid == pgwire.OIDInt4 && len(b) == 4:
+		return types.NewInt4(int32(be.Uint32(b))), nil
+	case oid == pgwire.OIDInt8 && len(b) == 8:
+		return types.NewInt8(int64(be.Uint64(b))), nil
+	case oid == pgwire.OIDFloat8 && len(b) == 8:
+		return types.NewFloat8(math.Float64frombits(be.Uint64(b))), nil
+	case oid == pgwire.OIDBool && len(b) == 1 && b[0] <= 1:
+		return types.NewBool(b[0] == 1), nil
+	case oid == pgwire.OIDTimestampTZ && len(b) == 8:
+		return types.NewTimestampTZ(int64(be.Uint64(b))), nil
+	case oid == pgwire.OIDText:
+		return types.NewText(string(b)), nil
+	}
+	return types.Value{}, fmt.Errorf("bad binary value %x for type %d", b, oid)
+}
+
+// readUntilReady collects the results of one Query, or of one extended
+// sequence, as the server sends them, up to ReadyForQuery.
 func (w *wireSession) readUntilReady() ([]Result, error) {
 	var out []Result
 	var cur *Result
 	var qerr error
+	var oids []uint32
+	var formats []int16
 	for {
 		typ, body, err := w.rd.ReadMessage()
 		if err != nil {
@@ -93,12 +130,15 @@ func (w *wireSession) readUntilReady() ([]Result, error) {
 			n := int(binary.BigEndian.Uint16(body))
 			body = body[2:]
 			letters := make([]byte, n)
+			oids, formats = make([]uint32, n), make([]int16, n)
 			for i := range n {
 				end := bytes.IndexByte(body, 0)
 				body = body[end+1:]
-				l, ok := oidLetter[binary.BigEndian.Uint32(body[6:])]
+				oids[i] = binary.BigEndian.Uint32(body[6:])
+				formats[i] = int16(binary.BigEndian.Uint16(body[16:]))
+				l, ok := oidLetter[oids[i]]
 				if !ok {
-					return nil, fmt.Errorf("unknown type OID %d", binary.BigEndian.Uint32(body[6:]))
+					return nil, fmt.Errorf("unknown type OID %d", oids[i])
 				}
 				letters[i] = l
 				body = body[18:]
@@ -114,6 +154,13 @@ func (w *wireSession) readUntilReady() ([]Result, error) {
 				switch {
 				case l < 0:
 					row[i] = "NULL"
+				case formats[i] == pgwire.FormatBinary:
+					v, err := binaryValue(oids[i], body[:l])
+					if err != nil {
+						return nil, err
+					}
+					row[i] = formatValue(v)
+					body = body[l:]
 				case l == 0:
 					row[i] = "(empty)"
 				default:
@@ -144,7 +191,7 @@ func (w *wireSession) readUntilReady() ([]Result, error) {
 			qerr = e
 		case 'Z':
 			return out, qerr
-		case 'R', 'S', 'K', 'N', 'I':
+		case 'R', 'S', 'K', 'N', 'I', '1', '2', 'n':
 		default:
 			return nil, fmt.Errorf("unexpected message %q", typ)
 		}
@@ -152,9 +199,18 @@ func (w *wireSession) readUntilReady() ([]Result, error) {
 }
 
 func (w *wireSession) Exec(_ context.Context, sql string) ([]Result, error) {
-	b := append([]byte{'Q', 0, 0, 0, 0}, sql...)
-	b = append(b, 0)
-	binary.BigEndian.PutUint32(b[1:], uint32(len(b)-1))
+	b := pgwire.EncodeQuery(sql)
+	// Several statements, and statements with $ (whose parameters the
+	// files test as errors of a simple query), stay simple queries.
+	if stmts, err := parser.Parse(sql); w.extended && err == nil && len(stmts) == 1 && !strings.Contains(sql, "$") {
+		b = bytes.Join([][]byte{
+			pgwire.Parse{Query: sql}.Encode(),
+			pgwire.Bind{ResultFormats: []int16{pgwire.FormatBinary}}.Encode(),
+			pgwire.EncodeDescribe('P', ""),
+			pgwire.Execute{}.Encode(),
+			pgwire.EncodeSync(),
+		}, nil)
+	}
 	_ = w.c.SetDeadline(time.Now().Add(time.Minute))
 	if _, err := w.c.Write(b); err != nil {
 		return nil, err
@@ -173,27 +229,30 @@ func (w *wireSession) Abandon() {
 	_ = w.srv.Close()
 }
 
-// TestSQLLogicOverTheWire runs every test file through the server: the
-// protocol must carry exactly what the executor returns.
+// TestSQLLogicOverTheWire runs every test file through the server, with
+// simple queries, and again with the extended protocol and binary results:
+// the protocol must carry exactly what the executor returns.
 func TestSQLLogicOverTheWire(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.test"))
 	if err != nil || len(files) == 0 {
 		t.Fatal(files, err)
 	}
 	for _, name := range files {
-		t.Run(filepath.Base(name), func(t *testing.T) {
-			f, err := os.Open(name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = f.Close() }()
-			n, err := (&Runner{Frames: 256, Open: openWire}).RunFile(context.Background(), name, f)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if n == 0 {
-				t.Fatal("no records")
-			}
-		})
+		for mode, open := range map[string]Opener{"simple": openWire, "extended": openExtended} {
+			t.Run(filepath.Base(name)+"/"+mode, func(t *testing.T) {
+				f, err := os.Open(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = f.Close() }()
+				n, err := (&Runner{Frames: 256, Open: open}).RunFile(context.Background(), name, f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n == 0 {
+					t.Fatal("no records")
+				}
+			})
+		}
 	}
 }

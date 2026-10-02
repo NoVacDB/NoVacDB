@@ -244,7 +244,7 @@ func (st *stmt) insert(s *ast.Insert) (*Result, error) {
 	}
 
 	// Bind every value and the defaults of the other columns.
-	b := &binder{sql: st.sql}
+	b := st.binder()
 	targeted := make([]bool, len(tbl.Columns))
 	for _, t := range targets {
 		targeted[t] = true
@@ -265,6 +265,10 @@ func (st *stmt) insert(s *ast.Insert) (*Result, error) {
 				return nil, err
 			}
 		}
+	}
+
+	if st.describe {
+		return &Result{}, nil
 	}
 
 	// Compute and check.
@@ -323,6 +327,9 @@ func (st *stmt) update(s *ast.Update) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st.describe {
+		return &Result{}, nil
+	}
 	var changes []change
 	err = st.scan(tbl, st.access(tbl, where), where, func(rid storage.RID, old []types.Value) (bool, error) {
 		row := append([]types.Value(nil), old...)
@@ -357,6 +364,9 @@ func (st *stmt) delete(s *ast.Delete) (*Result, error) {
 	where, err := st.rowBinder(tbl, s.Table).where(s.Where)
 	if err != nil {
 		return nil, err
+	}
+	if st.describe {
+		return &Result{}, nil
 	}
 	var changes []change
 	err = st.scan(tbl, st.access(tbl, where), where, func(rid storage.RID, old []types.Value) (bool, error) {

@@ -138,11 +138,12 @@ const (
 
 // FieldDescription describes one column of a RowDescription. NoVacDB's
 // columns are always computed (table OID and attribute number 0), with no
-// type modifier, in text format.
+// type modifier.
 type FieldDescription struct {
 	Name    string
 	TypeOID uint32
 	Size    int16 // -1 for variable length
+	Format  int16 // FormatText or FormatBinary
 }
 
 // RowDescription ('T').
@@ -155,8 +156,8 @@ func (w *Buffer) RowDescription(fields []FieldDescription) {
 		w.b = binary.BigEndian.AppendUint16(w.b, 0) // attribute number
 		w.int32(int32(f.TypeOID))                   // type OID
 		w.b = binary.BigEndian.AppendUint16(w.b, uint16(f.Size))
-		w.int32(-1)                                 // type modifier
-		w.b = binary.BigEndian.AppendUint16(w.b, 0) // text format
+		w.int32(-1) // type modifier
+		w.int16(f.Format)
 	}
 	w.end(at)
 }

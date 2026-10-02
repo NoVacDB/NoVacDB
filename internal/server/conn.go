@@ -22,6 +22,9 @@ type conn struct {
 	br  *bufio.Reader
 	out pgwire.Buffer
 	log *slog.Logger
+
+	stmts   map[string]*statement // prepared statements, by name
+	portals map[string]*portal    // portals, by name
 }
 
 // handle serves a connection until it ends. A panic is contained here: it
@@ -233,15 +236,20 @@ func (s *session) parameterStatus(serverVersion string) []pgwire.Param {
 	}
 }
 
-// serve runs the session after startup (design doc sections 2.4 and 2.8).
-// It returns nil when the client terminates, a *sqlerr.Error to send as
-// FATAL, or a network error.
+// serve runs the session after startup (design doc sections 2.8 and
+// 2.9). It returns nil when the client terminates, a *sqlerr.Error to send
+// as FATAL, or a network error.
 func (cn *conn) serve() error {
 	rd := pgwire.NewReader(cn.br)
+	cn.stmts, cn.portals = map[string]*statement{}, map[string]*portal{}
 	skipToSync := false // after an error in an extended-protocol sequence
 	for {
-		if err := cn.flush(); err != nil {
-			return err
+		// Output waits while more input is already here, so a pipeline's
+		// answers go out together, but never past the flush size.
+		if cn.br.Buffered() == 0 || cn.out.Len() >= flushAt {
+			if err := cn.flush(); err != nil {
+				return err
+			}
 		}
 		typ, body, err := rd.ReadMessage()
 		if err != nil {
@@ -258,18 +266,33 @@ func (cn *conn) serve() error {
 			if err != nil {
 				return protocolViolation(err)
 			}
+			// A simple query ends the implicit transaction and replaces the
+			// unnamed statement, as in PostgreSQL.
+			cn.endTransaction()
+			delete(cn.stmts, "")
 			if err := cn.query(sql); err != nil {
 				return err
 			}
 			cn.out.ReadyForQuery(pgwire.StatusIdle)
-		case 'P', 'B', 'D', 'E', 'C', 'H': // Parse, Bind, Describe, Execute, Close, Flush
-			if !skipToSync {
-				cn.out.ErrorResponse(errorFields(pgwire.SeverityError,
-					sqlerr.New(sqlerr.FeatureNotSupported, "the extended query protocol is not implemented yet")))
+		case 'P', 'B', 'D', 'E', 'C': // Parse, Bind, Describe, Execute, Close
+			if skipToSync {
+				continue
+			}
+			if err := cn.extended(typ, body); err != nil {
+				var se *sqlerr.Error
+				if !errors.As(err, &se) {
+					return err
+				}
+				cn.out.ErrorResponse(errorFields(pgwire.SeverityError, se))
 				skipToSync = true
+			}
+		case 'H': // Flush
+			if err := cn.flush(); err != nil {
+				return err
 			}
 		case 'S': // Sync
 			skipToSync = false
+			cn.endTransaction()
 			cn.out.ReadyForQuery(pgwire.StatusIdle)
 		case 'F': // FunctionCall
 			cn.out.ErrorResponse(errorFields(pgwire.SeverityError,
@@ -296,9 +319,14 @@ func (cn *conn) query(sql string) error {
 		return nil
 	}
 	for _, r := range results {
-		if err := cn.sendResult(r); err != nil {
-			return err
+		cn.notices(r)
+		if r.Columns != nil {
+			cn.rowDescription(r.Columns, nil)
+			if err := cn.dataRows(r.Rows, nil); err != nil {
+				return err
+			}
 		}
+		cn.out.CommandComplete(r.Tag)
 	}
 	if err != nil {
 		cn.out.ErrorResponse(errorFields(pgwire.SeverityError, sqlerr.From(err)))
@@ -306,53 +334,48 @@ func (cn *conn) query(sql string) error {
 	return nil
 }
 
-// sendResult sends one statement's notices, rows and command tag, writing
-// out the buffer whenever it grows past flushAt.
-func (cn *conn) sendResult(r *executor.Result) error {
+// notices sends a statement's notices.
+func (cn *conn) notices(r *executor.Result) {
 	for _, n := range r.Notices {
 		cn.out.NoticeResponse(pgwire.ErrorFields{Severity: pgwire.SeverityNotice, Code: n.Code, Message: n.Message})
 	}
-	if r.Columns != nil {
-		fields := make([]pgwire.FieldDescription, len(r.Columns))
-		for i, c := range r.Columns {
-			oid, size := typeInfo(c.Type)
-			fields[i] = pgwire.FieldDescription{Name: c.Name, TypeOID: oid, Size: size}
-		}
-		cn.out.RowDescription(fields)
-		vals := make([][]byte, len(r.Columns))
-		for _, row := range r.Rows {
-			for i, v := range row {
-				if v.Null {
-					vals[i] = nil
-				} else {
-					vals[i] = []byte(types.Format(v))
-				}
-			}
-			cn.out.DataRow(vals)
-			if cn.out.Len() >= flushAt {
-				if err := cn.flush(); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	cn.out.CommandComplete(r.Tag)
-	return nil
 }
 
-// typeInfo returns a column type's PostgreSQL OID and size.
-func typeInfo(t types.Type) (oid uint32, size int16) {
-	switch t {
-	case types.Int4:
-		return pgwire.OIDInt4, 4
-	case types.Int8:
-		return pgwire.OIDInt8, 8
-	case types.Float8:
-		return pgwire.OIDFloat8, 8
-	case types.Bool:
-		return pgwire.OIDBool, 1
-	case types.TimestampTZ:
-		return pgwire.OIDTimestampTZ, 8
+// dataRows sends rows in formats (nil: all text), writing out the buffer
+// whenever it grows past flushAt.
+func (cn *conn) dataRows(rows [][]types.Value, formats []int16) error {
+	var vals [][]byte
+	buf := make([]byte, 0, 64) // never nil: an empty value is not NULL
+	for _, row := range rows {
+		vals, buf = vals[:0], buf[:0]
+		ends := make([]int, 0, len(row))
+		for i, v := range row {
+			if v.Null {
+				ends = append(ends, -1)
+				continue
+			}
+			f := int16(pgwire.FormatText)
+			if formats != nil {
+				f = formats[i]
+			}
+			buf = appendValue(buf, v, f)
+			ends = append(ends, len(buf))
+		}
+		start := 0
+		for _, end := range ends {
+			if end < 0 {
+				vals = append(vals, nil)
+				continue
+			}
+			vals = append(vals, buf[start:end:end])
+			start = end
+		}
+		cn.out.DataRow(vals)
+		if cn.out.Len() >= flushAt {
+			if err := cn.flush(); err != nil {
+				return err
+			}
+		}
 	}
-	return pgwire.OIDText, -1
+	return nil
 }

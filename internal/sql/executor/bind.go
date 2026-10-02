@@ -20,6 +20,9 @@ type binder struct {
 	// noVars, if set, makes a column reference this error (LIMIT,
 	// DEFAULT expressions).
 	noVars func() *sqlerr.Error
+	// params are the statement's parameters; nil where there are none
+	// (stored defaults, DDL).
+	params *params
 }
 
 // at positions err at a byte offset of the query.
@@ -44,6 +47,10 @@ func unknownLit(n node) bool { return n.typ() == types.Unknown }
 func (b *binder) coerce(n node, pos int, t types.Type) (node, error) {
 	if !unknownLit(n) {
 		return n, nil
+	}
+	if p, ok := n.(*paramNode); ok {
+		p.p.types[p.n-1] = t // inferred from the context, as PostgreSQL does
+		return p, nil
 	}
 	c := n.(*constNode)
 	if c.v.Null {
@@ -195,7 +202,7 @@ func (b *binder) bind(e ast.Expr) (node, error) {
 	case *ast.Default:
 		return nil, b.at(sqlerr.New(sqlerr.SyntaxError, "DEFAULT is not allowed in this context"), e.P)
 	case *ast.Param:
-		return nil, b.at(sqlerr.New(sqlerr.UndefinedParameter, "there is no parameter $%d", e.N), e.P)
+		return b.param(e)
 	case *ast.ColumnRef:
 		return b.column(e)
 	case *ast.Unary:

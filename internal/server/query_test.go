@@ -37,13 +37,13 @@ func (cl *client) query(sql string) []msg {
 
 // column is a decoded RowDescription field.
 type column struct {
-	name     string
-	table    uint32
-	attr     uint16
-	oid      uint32
-	size     int16
-	typmod   int32
-	textOnly uint16
+	name   string
+	table  uint32
+	attr   uint16
+	oid    uint32
+	size   int16
+	typmod int32
+	format uint16
 }
 
 func rowDescription(t *testing.T, body []byte) []column {
@@ -60,7 +60,7 @@ func rowDescription(t *testing.T, body []byte) []column {
 		c.oid = binary.BigEndian.Uint32(body[6:])
 		c.size = int16(binary.BigEndian.Uint16(body[10:]))
 		c.typmod = int32(binary.BigEndian.Uint32(body[12:]))
-		c.textOnly = binary.BigEndian.Uint16(body[16:])
+		c.format = binary.BigEndian.Uint16(body[16:])
 		body = body[18:]
 		out[i] = c
 	}
@@ -121,6 +121,10 @@ func TestQueryResults(t *testing.T) {
 	// NULLs are length -1, the empty string length 0.
 	if got := dataRow(t, ms[2].body); strings.Join(got, "|") != "NULL|NULL|NULL||NULL|NULL|NULL|" {
 		t.Fatalf("row %q", got)
+	}
+	// An empty string in the first row is still not NULL.
+	if ms := cl.query("SELECT '', NULL"); msgTypes(ms) != "TDCZ" || strings.Join(dataRow(t, ms[1].body), "|") != "|NULL" {
+		t.Fatalf("%q %q", msgTypes(ms), dataRow(t, ms[1].body))
 	}
 	// A SELECT with no rows still describes its columns.
 	if ms := cl.query("SELECT s FROM t WHERE false"); msgTypes(ms) != "TCZ" || tag(ms[1]) != "SELECT 0" {
@@ -197,33 +201,12 @@ func TestQueryErrorsAndNotices(t *testing.T) {
 	}
 }
 
-func TestOtherMessagesBeforeTheExtendedProtocol(t *testing.T) {
+func TestOtherMessages(t *testing.T) {
 	_, addr := startServer(t, Config{})
 	cl := openSession(t, addr)
-	// Parse, Bind, Execute, Sync: one error, the rest skipped to Sync.
-	cl.send(message('P', "\x00SELECT 1\x00\x00\x00"))
-	cl.send(message('B', "\x00\x00\x00\x00\x00\x00\x00\x00"))
-	cl.send(message('E', "\x00\x00\x00\x00\x00"))
-	cl.send(message('H', ""))
-	cl.send(message('S', ""))
-	ms := cl.readUntilReady()
-	if msgTypes(ms) != "EZ" || fields(ms[0].body)['C'] != sqlerr.FeatureNotSupported {
-		t.Fatalf("%q %v", msgTypes(ms), fields(ms[0].body))
-	}
-	// Sync alone; then the session works.
-	cl.send(message('S', ""))
-	if ms := cl.readUntilReady(); msgTypes(ms) != "Z" {
-		t.Fatalf("%q", msgTypes(ms))
-	}
-	// Sync ended the skipping: the next sequence gets its own error.
-	cl.send(message('P', "\x00SELECT 1\x00\x00\x00"))
-	cl.send(message('S', ""))
-	if ms := cl.readUntilReady(); msgTypes(ms) != "EZ" {
-		t.Fatalf("%q", msgTypes(ms))
-	}
 	// A function call.
 	cl.send(message('F', "\x00\x00\x00\x01"))
-	if ms := cl.readUntilReady(); msgTypes(ms) != "EZ" {
+	if ms := cl.readUntilReady(); msgTypes(ms) != "EZ" || fields(ms[0].body)['C'] != sqlerr.FeatureNotSupported {
 		t.Fatalf("%q", msgTypes(ms))
 	}
 	// Copy messages outside a COPY are ignored.
@@ -231,6 +214,11 @@ func TestOtherMessagesBeforeTheExtendedProtocol(t *testing.T) {
 	cl.send(message('c', ""))
 	cl.send(message('f', "why\x00"))
 	if ms := cl.query("SELECT 1"); msgTypes(ms) != "TDCZ" {
+		t.Fatalf("%q", msgTypes(ms))
+	}
+	// Sync alone.
+	cl.send(message('S', ""))
+	if ms := cl.readUntilReady(); msgTypes(ms) != "Z" {
 		t.Fatalf("%q", msgTypes(ms))
 	}
 }

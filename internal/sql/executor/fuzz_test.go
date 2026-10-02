@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/types"
 )
 
 const fuzzSchema = `CREATE TABLE t (id int PRIMARY KEY, a bigint, f double precision, s text UNIQUE, b boolean, ts timestamptz DEFAULT now());
@@ -52,5 +53,73 @@ func FuzzExec(f *testing.F) {
 		if _, err := db.Exec(bg, "SELECT * FROM t"); err != nil && sqlerr.Code(err) != sqlerr.UndefinedTable {
 			t.Fatalf("after %q: %v", sql, err)
 		}
+	})
+}
+
+// FuzzPrepare prepares arbitrary SQL and runs it with every parameter NULL
+// and then with a sample value of its type. Preparing changes nothing and
+// never evaluates a parameter; running blames only the query; and the
+// indexes still match their tables.
+func FuzzPrepare(f *testing.F) {
+	for _, s := range []string{
+		"SELECT * FROM t WHERE id = $1 AND s LIKE $2 ORDER BY a LIMIT $3 OFFSET $4",
+		"INSERT INTO t VALUES ($1, $2, $3, $4, $5, $6)",
+		"UPDATE t SET a = a + $1, s = $2 || s WHERE id > $3",
+		"DELETE FROM t WHERE ts < $1 OR b = $2",
+		"SELECT $1, $2::int, $3 + 1.5, coalesce($4, a), $5 IS NULL FROM t",
+		"SELECT CASE WHEN $1 THEN $2 ELSE s END FROM t WHERE id IN ($3, $4)",
+		"SELECT $1 WHERE $1 = $2",
+		"CREATE TABLE u (x int DEFAULT $1)",
+	} {
+		f.Add(s)
+	}
+	samples := map[types.Type]types.Value{
+		types.Int4: types.NewInt4(2), types.Int8: types.NewInt8(10), types.Float8: types.NewFloat8(1.5),
+		types.Text: types.NewText("one"), types.Bool: types.NewBool(true), types.TimestampTZ: types.NewTimestampTZ(0),
+	}
+	f.Fuzz(func(t *testing.T, sql string) {
+		db := openDB(t, newFS(t), Options{Frames: 64})
+		defer func() { _ = db.Close(bg) }()
+		mustExec(t, db, fuzzSchema)
+		blamesQuery := func(what string, err error) {
+			if err == nil {
+				return
+			}
+			var se *sqlerr.Error
+			if !errors.As(err, &se) {
+				t.Fatalf("%q %s: error %T %v", sql, what, err, err)
+			}
+			switch se.Code {
+			case sqlerr.InternalError, sqlerr.DataCorrupted, sqlerr.IOError:
+				t.Fatalf("%q %s: %v", sql, what, err)
+			}
+		}
+		before := format(mustExec(t, db, "SELECT * FROM t ORDER BY id")[0])
+		p, err := db.Prepare(bg, sql, nil)
+		blamesQuery("prepare", err)
+		if after := format(mustExec(t, db, "SELECT * FROM t ORDER BY id")[0]); after != before {
+			t.Fatalf("%q: preparing changed the table:\n%s", sql, after)
+		}
+		if err != nil {
+			return
+		}
+		for i, pt := range p.ParamTypes {
+			if !pt.Valid() {
+				t.Fatalf("%q: parameter $%d has type %v", sql, i+1, pt)
+			}
+		}
+		nulls := make([]types.Value, len(p.ParamTypes))
+		vals := make([]types.Value, len(p.ParamTypes))
+		for i, pt := range p.ParamTypes {
+			nulls[i], vals[i] = types.Null(pt), samples[pt]
+		}
+		for _, v := range [][]types.Value{nulls, vals} {
+			r, err := db.ExecPrepared(bg, p, v)
+			blamesQuery("run", err)
+			if err == nil && !p.Empty() && !sameColumns(r.Columns, p.Columns) {
+				t.Fatalf("%q: columns %v, prepared %v", sql, r.Columns, p.Columns)
+			}
+		}
+		checkConsistency(t, db)
 	})
 }
