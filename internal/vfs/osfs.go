@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 const (
@@ -136,8 +137,9 @@ func (OSFS) SyncDir(dir string) error {
 
 // osFile wraps *os.File to enforce open flags and map errors.
 type osFile struct {
-	f    *os.File
-	flag Flag
+	f      *os.File
+	flag   Flag
+	closed atomic.Bool // set by Close
 }
 
 func (o *osFile) ReadAt(p []byte, off int64) (int, error) {
@@ -175,6 +177,11 @@ func (o *osFile) Truncate(size int64) error {
 }
 
 func (o *osFile) Size() (int64, error) {
+	// Stat on a closed file is not os.ErrClosed before Go 1.23 ("use of
+	// closed file"), so the closed state is checked here.
+	if o.closed.Load() {
+		return 0, fmt.Errorf("size: %w", ErrClosed)
+	}
 	info, err := o.f.Stat()
 	if err != nil {
 		return 0, wrapIO(err)
@@ -182,7 +189,11 @@ func (o *osFile) Size() (int64, error) {
 	return info.Size(), nil
 }
 
-func (o *osFile) Close() error { return wrapIO(o.f.Close()) }
+func (o *osFile) Close() error {
+	err := wrapIO(o.f.Close())
+	o.closed.Store(true)
+	return err
+}
 
 // wrapIO maps errors but leaves io.EOF untouched, since callers compare
 // against it directly.
