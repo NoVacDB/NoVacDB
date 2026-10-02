@@ -312,7 +312,14 @@ func TestMissingIndexEntryIsCorruption(t *testing.T) {
 	// Remove row 1's primary key entry behind the executor's back.
 	tbl, _ := db.cat.Table("t")
 	ix := tbl.PrimaryKey()
-	key := catalog.KeyPrefix([]types.Value{types.NewInt4(1)})
+	rids, err := ix.Lookup(bg, catalog.KeyPrefix([]types.Value{types.NewInt4(1)}))
+	if err != nil || len(rids) != 1 {
+		t.Fatal(rids, err)
+	}
+	key, err := ix.Key([]types.Value{types.NewInt4(1), types.NewInt4(10)}, rids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := db.e.BeginStatement(bg); err != nil {
 		t.Fatal(err)
 	}

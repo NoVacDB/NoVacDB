@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -469,15 +470,20 @@ func TestUniqueIndexAllowsManyNulls(t *testing.T) {
 		t.Fatalf("unique index over several NULLs: %v", err)
 	}
 	ix, _ := d.c.Index("u")
+	// Every entry carries its row's RID, in unique indexes too (design doc
+	// 08 section 2.11); uniqueness is on the columns, which NULLs escape.
 	k1, _ := ix.Key([]types.Value{types.NewInt4(1)}, storage.RID{Page: 5, Slot: 1})
 	k2, _ := ix.Key([]types.Value{types.NewInt4(1)}, storage.RID{Page: 6, Slot: 2})
-	if string(k1) != string(k2) {
-		t.Fatal("a unique key without NULLs must not depend on the row's location")
+	p1, ok1 := ix.UniquePrefix([]types.Value{types.NewInt4(1)})
+	if string(k1) == string(k2) || !ok1 || !bytes.HasPrefix(k1, p1) || !bytes.HasPrefix(k2, p1) {
+		t.Fatalf("keys %x and %x, unique prefix %x (%v)", k1, k2, p1, ok1)
 	}
-	n1, _ := ix.Key([]types.Value{types.Null(types.Int4)}, storage.RID{Page: 5, Slot: 1})
-	n2, _ := ix.Key([]types.Value{types.Null(types.Int4)}, storage.RID{Page: 6, Slot: 2})
-	if string(n1) == string(n2) {
-		t.Fatal("unique keys with NULLs must differ by location")
+	if p, ok := ix.UniquePrefix([]types.Value{types.Null(types.Int4)}); ok || p != nil {
+		t.Fatal("a NULL has a unique prefix")
+	}
+	// The index holds the three rows; a lookup by the prefix finds the one.
+	if rids, err := ix.Lookup(bg, p1); err != nil || len(rids) != 1 {
+		t.Fatalf("Lookup = %v, %v", rids, err)
 	}
 	if got := ix.DescribeKey(k1); got != "(a)=(1)" {
 		t.Fatalf("DescribeKey = %s", got)
@@ -967,15 +973,15 @@ func TestKeySizeLimit(t *testing.T) {
 	unique := &Index{Name: "u", Table: tbl, Columns: []int{0}, Unique: true}
 	plain := &Index{Name: "p", Table: tbl, Columns: []int{0}}
 	rid := storage.RID{Page: 3, Slot: 4}
-	// A text key takes its length plus 3 bytes; a non-unique one adds the
-	// RID's 18.
+	// A text key takes its length plus 3 bytes, and the RID's 18, in a
+	// unique index as in any other.
 	for _, c := range []struct {
 		ix  *Index
 		n   int
 		err bool
 	}{
-		{unique, btree.MaxKeySize - 3, false},
-		{unique, btree.MaxKeySize - 2, true},
+		{unique, btree.MaxKeySize - 21, false},
+		{unique, btree.MaxKeySize - 20, true},
 		{plain, btree.MaxKeySize - 21, false},
 		{plain, btree.MaxKeySize - 20, true},
 	} {

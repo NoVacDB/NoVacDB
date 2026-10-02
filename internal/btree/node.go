@@ -34,7 +34,7 @@ var errNodeFull = errors.New("btree: node full")
 //	40      8     reserved  (zero)
 //	48      2*N   slot array: cell offsets, in key order
 //
-// Leaf cell: u16 KeyLen, u16 ValueLen, key, value.
+// Leaf cell: u16 KeyLen, u16 ValueLen, u8 Flags (zero until Phase 6), key, value.
 // Internal cell: u16 KeyLen, u64 Child, key.
 // Every byte that is not header, slot or cell is zero.
 const (
@@ -48,7 +48,8 @@ const (
 
 	nodeSpace     = storage.PageSize - slotsStart
 	slotSize      = 2
-	leafCellHdr   = 4
+	leafCellHdr   = 5 // u16 key length, u16 value length, u8 flags
+	leafOffFlags  = 4
 	innerCellHdr  = 10
 	maxLeafCell   = leafCellHdr + MaxKeySize + MaxValueSize
 	maxInnerCell  = innerCellHdr + MaxKeySize
@@ -150,6 +151,11 @@ func (n node) cellBounds(i int) (off, size int, err error) {
 		vl := n.u16(off + 2)
 		if vl > MaxValueSize {
 			return 0, 0, corrupt("cell %d value length %d", i, vl)
+		}
+		// Flags are reserved for Phase 6 (delete marks) and always zero
+		// until then: a page with others was not written by this code.
+		if f := n.b[off+leafOffFlags]; f != 0 {
+			return 0, 0, corrupt("cell %d has flags %#x", i, f)
 		}
 		size += vl
 	}
@@ -304,6 +310,7 @@ func (n node) insertLeaf(i int, key, val []byte) error {
 	}
 	binary.LittleEndian.PutUint16(c, uint16(len(key)))
 	binary.LittleEndian.PutUint16(c[2:], uint16(len(val)))
+	c[leafOffFlags] = 0
 	copy(c[leafCellHdr:], key)
 	copy(c[leafCellHdr+len(key):], val)
 	return nil

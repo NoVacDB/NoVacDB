@@ -2,12 +2,12 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/catalog"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/ast"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/types"
-	"github.com/vikrant-choudhary06/NoVacDB/internal/wal"
 )
 
 func (st *stmt) createTable(s *ast.CreateTable) (*Result, error) {
@@ -66,7 +66,7 @@ func (st *stmt) createTable(s *ast.CreateTable) (*Result, error) {
 			def.Unique = append(def.Unique, cols)
 		}
 	}
-	_, err := st.apply(true, func(ctx context.Context) error {
+	err := st.apply(true, func(ctx context.Context) error {
 		_, err := st.db.cat.CreateTable(ctx, def)
 		return err
 	})
@@ -99,15 +99,16 @@ func (st *stmt) dropTable(s *ast.DropTable) (*Result, error) {
 	case !ok:
 		return nil, sqlerr.New(sqlerr.UndefinedTable, "table %q does not exist", s.Name.Name).At(st.sql, s.Name.P)
 	}
-	var pages []uint64
-	lsn, err := st.apply(true, func(ctx context.Context) (err error) {
-		pages, err = st.db.cat.DropTable(ctx, tbl)
-		return err
+	err := st.apply(true, func(ctx context.Context) error {
+		pages, err := st.db.cat.DropTable(ctx, tbl)
+		if err != nil {
+			return err
+		}
+		return st.freeLater(ctx, pages)
 	})
 	if err != nil {
 		return nil, err
 	}
-	st.freeAfter(pages, lsn)
 	return res, nil
 }
 
@@ -116,12 +117,16 @@ func (st *stmt) isIndex(name string) bool {
 	return ok
 }
 
-// freeAfter hands a dropped object's pages to the checkpointer, which frees
-// them once its redo point passes the commit (10-executor.md section 2.5).
-func (st *stmt) freeAfter(pages []uint64, commit wal.LSN) {
-	for _, p := range pages {
-		st.db.e.Logger().DeferFree(p, uint64(commit))
+// freeLater hands a dropped object's pages to the checkpointer, inside the
+// statement group: the request is logged, so it is discarded with the
+// statement or survives a crash with it, and the pages are freed once a
+// checkpoint's redo point is past it (08-btree.md section 2.7). A failure is
+// never a *sqlerr.Error, so the statement is abandoned.
+func (st *stmt) freeLater(ctx context.Context, pages []uint64) error {
+	if err := st.db.e.Logger().DeferFree(ctx, pages...); err != nil {
+		return fmt.Errorf("dropping: %w", err)
 	}
+	return nil
 }
 
 func (st *stmt) createIndex(s *ast.CreateIndex) (*Result, error) {
@@ -141,7 +146,7 @@ func (st *stmt) createIndex(s *ast.CreateIndex) (*Result, error) {
 		}
 		cols[i] = c.Name
 	}
-	_, err = st.apply(true, func(ctx context.Context) error {
+	err = st.apply(true, func(ctx context.Context) error {
 		_, err := st.db.cat.CreateIndex(ctx, tbl, s.Name.Name, cols, s.Unique)
 		return err
 	})
@@ -168,14 +173,15 @@ func (st *stmt) dropIndex(s *ast.DropIndex) (*Result, error) {
 	case !ok:
 		return nil, sqlerr.New(sqlerr.UndefinedObject, "index %q does not exist", s.Name.Name).At(st.sql, s.Name.P)
 	}
-	var pages []uint64
-	lsn, err := st.apply(true, func(ctx context.Context) (err error) {
-		pages, err = st.db.cat.DropIndex(ctx, ix)
-		return err
+	err := st.apply(true, func(ctx context.Context) error {
+		pages, err := st.db.cat.DropIndex(ctx, ix)
+		if err != nil {
+			return err
+		}
+		return st.freeLater(ctx, pages)
 	})
 	if err != nil {
 		return nil, positioned(err, st.sql, s.Name.P)
 	}
-	st.freeAfter(pages, lsn)
 	return res, nil
 }

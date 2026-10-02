@@ -126,7 +126,7 @@ Header slot payload (starts at page offset 24):
 | payload offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | Magic | bytes `"NOVACDB\0"` |
-| 8 | 4 | FormatVersion | uint32, currently 1 |
+| 8 | 4 | FormatVersion | uint32, currently 2 (1 before B+Tree leaf cells gained a Flags byte, 08-btree.md revision 2; version 1 files are refused) |
 | 12 | 4 | PageSize | uint32, must equal 8192 |
 | 16 | 8 | Generation | uint64; slot used = generation % 2; higher wins |
 | 24 | 8 | PageCount | uint64; total pages including the 2 header pages; ≥ 2 |
@@ -187,7 +187,7 @@ Unit tests, table-driven, run against `MemFS` and `OSFS` (shared suite like vfs)
 - Pages survive reopen: write N pages with distinct contents, `Sync`, `Close`, `Open`, read back identical.
 - Allocation: IDs start at 2 and increase; `PageCount` grows; freed pages are reused LIFO; free count tracks; allocated-unwritten page returns `ErrZeroPage`.
 - Errors: reserved IDs 0 and 1, `id >= PageCount`, wrong buffer size, header ID not equal to `id`, double free, use after `Close`, cancelled context (before I/O only).
-- Corrupt and foreign files: empty file, file of random bytes (`ErrCorrupt`/`ErrBadMagic`), good header with wrong magic, with version 2, with page size 4096, both slots damaged, one slot damaged (open succeeds on the other), higher generation wins, flipped byte in each header field area, free list head out of range.
+- Corrupt and foreign files: empty file, file of random bytes (`ErrCorrupt`/`ErrBadMagic`), good header with wrong magic, with a future version, with version 1, with page size 4096, both slots damaged, one slot damaged (open succeeds on the other), higher generation wins, flipped byte in each header field area, free list head out of range.
 - Injected I/O errors on every `Write`, `Sync`, `Rename` and `SyncDir` step of `Create`, `Allocate`, `Free`: the manager enters the failed state (`ErrFailed`), and reopening yields a consistent file.
 - Edge cases: exactly `MaxPages` reached (`ErrFull`, using a hook to set a small limit), freeing and allocating the last page.
 - Concurrency: many goroutines writing/reading distinct pages while others allocate and free, under `-race`, also with `-count=20`.

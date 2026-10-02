@@ -35,6 +35,7 @@ func sortKeys(keys [][]byte) {
 // opCounts summarises a tree's structural-change counters.
 type opCounts struct {
 	splits, rootSplits, merges [2]uint64
+	leftMerges                 [2]uint64
 	redist                     [2][2]uint64
 	collapses                  uint64
 }
@@ -45,6 +46,7 @@ func (t *Tree) opCounts() opCounts {
 		c.splits[k] = t.ops.splits[k].Load()
 		c.rootSplits[k] = t.ops.rootSplits[k].Load()
 		c.merges[k] = t.ops.merges[k].Load()
+		c.leftMerges[k] = t.ops.leftMerges[k].Load()
 		for d := range 2 {
 			c.redist[k][d] = t.ops.redistributions[k][d].Load()
 		}
@@ -58,6 +60,7 @@ func (c *opCounts) add(o opCounts) {
 		c.splits[k] += o.splits[k]
 		c.rootSplits[k] += o.rootSplits[k]
 		c.merges[k] += o.merges[k]
+		c.leftMerges[k] += o.leftMerges[k]
 		for d := range 2 {
 			c.redist[k][d] += o.redist[k][d]
 		}

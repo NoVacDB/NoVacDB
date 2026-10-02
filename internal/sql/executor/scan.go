@@ -180,16 +180,7 @@ func bounds(ix *catalog.Index, eq []types.Value, lo, hi *term) access {
 
 // successor returns the smallest key greater than every key starting with
 // p, or nil if there is none (p is empty or all 0xff).
-func successor(p []byte) []byte {
-	s := bytes.Clone(p)
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] < 0xff {
-			s[i]++
-			return s[:i+1]
-		}
-	}
-	return nil
-}
+func successor(p []byte) []byte { return catalog.KeySuccessor(p) }
 
 // prefixEnd is the exclusive end of the keys starting with p.
 func prefixEnd(p []byte) btree.Bound {

@@ -20,16 +20,17 @@ import (
 // semantics: LSNs grow by record size, FlushedLSN is "durable end - 1", and
 // the redo point moves when a checkpoint begins.
 type fakeLog struct {
-	mu       sync.Mutex
-	next     uint64
-	durable  uint64
-	redo     uint64
-	recs     []fakeRec
-	fail     error
-	images   int
-	ops      int
-	deferred []unlinked
-	after    func(blocks []Block) // runs after each append, pages still latched
+	mu         sync.Mutex
+	next       uint64
+	durable    uint64
+	redo       uint64
+	recs       []fakeRec
+	fail       error
+	images     int
+	ops        int
+	deferred   []unlinked
+	unlinkedBy map[uint64]uint64    // page -> LSN of the record that unlinked it
+	after      func(blocks []Block) // runs after each append, pages still latched
 }
 
 type fakeRec struct {
@@ -74,10 +75,25 @@ func (l *fakeLog) LogBTree(_ context.Context, build func(uint64) []byte) (uint64
 	return lsn, nil
 }
 
-func (l *fakeLog) DeferFree(page, lsn uint64) {
+// DeferFree records the pages; the unlinking records' LSNs come from the
+// tree's onUnlink hook, for tests that install it.
+func (l *fakeLog) DeferFree(_ context.Context, pages ...uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.deferred = append(l.deferred, unlinked{page, lsn})
+	for _, p := range pages {
+		l.deferred = append(l.deferred, unlinked{p, l.unlinkedBy[p]}) // 0 without the hook
+	}
+	return nil
+}
+
+// unlinked is the tree's onUnlink hook.
+func (l *fakeLog) unlinked(page, lsn uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.unlinkedBy == nil {
+		l.unlinkedBy = map[uint64]uint64{}
+	}
+	l.unlinkedBy[page] = lsn
 }
 
 func (l *fakeLog) flushedLSN() uint64 {
@@ -744,6 +760,7 @@ func TestDeferredFreesAreUnreachableAndAfterTheirRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tr.onUnlink = e.lg.unlinked
 	rng := rand.New(rand.NewPCG(testSeed(t), 81))
 	m := model{}
 	for len(m) < 3000 {

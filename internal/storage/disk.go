@@ -23,7 +23,9 @@ const (
 	// is therefore never data, so 0 can mean "none" in the free list.
 	FirstDataPage = headerSlots
 	// FormatVersion is the on-disk format version written by this code.
-	FormatVersion = 1
+	// Version 2 added a Flags byte to B+Tree leaf cells
+	// (docs/design/08-btree.md, revision 2); version 1 files are refused.
+	FormatVersion = 2
 	// MaxPages is the largest page count for which every page offset fits
 	// in an int64.
 	MaxPages = uint64(math.MaxInt64 / PageSize)
@@ -39,7 +41,7 @@ var fileMagic = [8]byte{'N', 'O', 'V', 'A', 'C', 'D', 'B', 0}
 //
 //	offset  size  field
 //	0       8     Magic          "NOVACDB\0"
-//	8       4     FormatVersion  uint32, currently 1
+//	8       4     FormatVersion  uint32, currently 2
 //	12      4     PageSize       uint32, must be 8192
 //	16      8     Generation     uint64; slot used = Generation % 2; higher wins
 //	24      8     PageCount      uint64; all pages including the 2 header pages

@@ -76,10 +76,10 @@ Decoding needs the table's column types. It checks every length and value, so a 
 
 An index entry's key is its columns encoded with the B+Tree's order-preserving key encoding (08-btree.md section 2.1): integers and timestamps as int64, `double precision` as float64 (which already makes `-0 = +0` and orders NaN last, as `Compare` does), text and booleans as themselves, NULL as NULL (sorting last). Its value is the row's RID (u64 page, u16 slot).
 
-- A **non-unique** index appends the RID to the key, so every entry is unique and entries for equal values sort by location.
-- A **unique** index's key is the columns alone, so a second row with the same values is found by a lookup. NULLs are never equal to each other, so when any key column is NULL the RID is appended (any number of rows may have NULLs, as in PostgreSQL).
+- **Every** index appends the RID to the key, so every entry is unique and entries for equal values sort by location. (Until the B+Tree's revision 2, a unique index's key was the columns alone; storing the RID everywhere lets Phase 6 keep a delete-marked entry and a live one with equal columns side by side, 08-btree.md section 2.11.)
+- A **unique** index enforces uniqueness on the columns with a prefix probe: the entries whose keys start with the new row's encoded columns (`Index.UniquePrefix`, `Index.Lookup`). NULLs are never equal to each other, so a row with a NULL in any key column has no prefix to check (any number of rows may have NULLs, as in PostgreSQL).
 
-A key longer than a B+Tree key may be (1024 bytes) is rejected with `54000`.
+A key longer than a B+Tree key may be (1024 bytes, RID included) is rejected with `54000`.
 
 ### 2.4 Statements are atomic (Step 4.4)
 
@@ -138,7 +138,7 @@ It is written once, when the database is created: the three heaps are created in
 - `CREATE TABLE` creates the heap and the catalog rows, and an index for the primary key and for each unique constraint. Primary key columns are `NOT NULL`. Index names follow PostgreSQL: `t_pkey`, `t_a_key`, `t_a_b_idx`, with a number appended on a clash.
 - `CREATE INDEX` first scans the table and checks uniqueness for a unique index (`23505`, with the duplicated key). Only then does it create the B+Tree and fill it.
 - `DROP TABLE` deletes the catalog rows of the table, its columns and its indexes. `DROP INDEX` deletes the index's row; a primary key's index cannot be dropped alone (`2BP01`).
-- The pages of a dropped table or index are freed as unlinked B+Tree pages are: the engine's checkpointer frees them once its redo point has passed the drop's commit record (08-btree.md section 2.7).
+- The pages of a dropped table or index are freed as unlinked B+Tree pages are: the statement logs them in a deferred-free record inside its statement group, before the commit, and the engine's checkpointer frees them once its redo point has passed that record (08-btree.md section 2.7). The request is discarded with an uncommitted statement and survives a crash with a committed one.
 
 **Errors and abandoning.** The DDL methods follow one rule, which tells the executor whether a failed statement can still commit: a `*sqlerr.Error` means nothing was changed; any other error (I/O, a full pool, a damaged page) may leave part of the change made, and the executor must abandon the statement (2.4). Everything that can fail with a SQL error is therefore checked before the first change: names (reserved, taken, empty or over 63 bytes), duplicate and missing columns, column and key-column counts, the size of each catalog row (a long `DEFAULT` can overflow one), and, for `CREATE INDEX` on a table with rows, uniqueness and key sizes.
 
@@ -173,7 +173,7 @@ Limit/Offset ← Distinct ← Project ← Sort ← Filter ← (SeqScan | IndexSc
 
 **Writes** run in two phases, both under the exclusive lock:
 
-1. **Compute and check.** Read the target rows (through the same scan planning), compute the new rows, apply defaults, and convert values to the column types. Check `NOT NULL` (`23502`), row and key sizes (`54000`), and uniqueness against the index and within the statement (`23505`, with PostgreSQL's detail "Key (a)=(1) already exists."). Uniqueness is checked against the state after the whole statement, as the SQL standard specifies: `UPDATE t SET id = id + 1` succeeds even when ids are consecutive. Nothing has changed yet, so any error simply returns.
+1. **Compute and check.** Read the target rows (through the same scan planning), compute the new rows, apply defaults, and convert values to the column types. Check `NOT NULL` (`23502`), row and key sizes (`54000`), and uniqueness against the index (a prefix probe on the new row's columns; an entry conflicts unless its row is one the statement changes) and within the statement (`23505`, with PostgreSQL's detail "Key (a)=(1) already exists."). Uniqueness is checked against the state after the whole statement, as the SQL standard specifies: `UPDATE t SET id = id + 1` succeeds even when ids are consecutive. Nothing has changed yet, so any error simply returns.
 2. **Apply** inside a statement group: for `UPDATE` and `DELETE`, first remove the old index entries, then change the heap, then add the new index entries; commit.
 
 Assignments convert values as PostgreSQL's assignment casts do: between numeric types (range-checked), from untyped literals by parsing, and from anything to `text`. Other mismatches are `42804` "column "a" is of type integer but expression is of type text".

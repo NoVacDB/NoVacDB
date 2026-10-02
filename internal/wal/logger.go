@@ -2,6 +2,8 @@ package wal
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -20,6 +22,9 @@ const (
 	// RecordStmtCommit ends a statement group; its payload is the begin
 	// record's LSN.
 	RecordStmtCommit RecordType = 5
+	// RecordDeferredFree lists pages to free once a checkpoint's redo point
+	// is past a given LSN (EncodeDeferredFree).
+	RecordDeferredFree RecordType = 6
 )
 
 // Logger connects heaps and B+Trees to the log (it implements
@@ -37,10 +42,10 @@ type Logger struct {
 	redo LSN
 
 	freeMu  sync.Mutex
-	pending []deferredFree // pages to free once the redo point passes them
+	pending map[uint64]uint64 // page -> LSN the redo point must pass before it is freed
 }
 
-// deferredFree is a page unlinked by the record at lsn.
+// deferredFree is a page to free once the redo point is past lsn.
 type deferredFree struct{ page, lsn uint64 }
 
 // NewLogger returns a Logger appending to w, with the given redo point (the
@@ -66,31 +71,77 @@ func (l *Logger) log(ctx context.Context, t RecordType, build func(redoPoint uin
 	return uint64(lsn), err
 }
 
-// DeferFree records that page was unlinked by the record at lsn. The
-// checkpointer frees it once a checkpoint's redo point is past lsn, when no
-// record that refers to the page can be replayed any more. A crash forgets
-// the list; the pages leak.
-func (l *Logger) DeferFree(page, lsn uint64) {
-	l.freeMu.Lock()
-	defer l.freeMu.Unlock()
-	l.pending = append(l.pending, deferredFree{page, lsn})
+// DeferFree asks for pages to be freed once no record that refers to them
+// can be replayed. It logs a deferred-free record naming them, so the list
+// survives a crash (docs/design/08-btree.md section 2.7), and the pages wait
+// for a checkpoint whose redo point is past that record. The record comes
+// after whatever unlinked the pages, so its LSN is a safe threshold. An
+// error means the record may or may not reach the log; the pages stay on
+// the list in memory either way.
+func (l *Logger) DeferFree(ctx context.Context, pages ...uint64) error {
+	for len(pages) > 0 {
+		n := min(len(pages), MaxDeferredPerRecord)
+		lsn, err := l.w.Append(ctx, RecordDeferredFree, EncodeDeferredFree(pages[:n], nil))
+		l.freeMu.Lock()
+		for _, p := range pages[:n] {
+			l.addPending(p, uint64(lsn))
+		}
+		l.freeMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("logging deferred frees: %w", err)
+		}
+		pages = pages[n:]
+	}
+	return nil
 }
 
-// takeFreeable removes and returns the deferred pages whose record lies
-// before redo.
+// restore puts a page on the list without logging it: replayed from the
+// log, or put back by a checkpoint that could not free it yet.
+func (l *Logger) restore(page, lsn uint64) {
+	l.freeMu.Lock()
+	defer l.freeMu.Unlock()
+	l.addPending(page, lsn)
+}
+
+// addPending adds or updates an entry, keeping the later threshold. The
+// caller holds freeMu.
+func (l *Logger) addPending(page, lsn uint64) {
+	if l.pending == nil {
+		l.pending = map[uint64]uint64{}
+	}
+	if old, ok := l.pending[page]; !ok || lsn > old {
+		l.pending[page] = lsn
+	}
+}
+
+// takeFreeable removes and returns the deferred pages whose threshold lies
+// before redo, in page order.
 func (l *Logger) takeFreeable(redo LSN) []deferredFree {
 	l.freeMu.Lock()
 	defer l.freeMu.Unlock()
 	var out []deferredFree
-	keep := l.pending[:0]
-	for _, d := range l.pending {
-		if LSN(d.lsn) < redo {
-			out = append(out, d)
-		} else {
-			keep = append(keep, d)
+	for p, lsn := range l.pending {
+		if LSN(lsn) < redo {
+			out = append(out, deferredFree{p, lsn})
+			delete(l.pending, p)
 		}
 	}
-	l.pending = keep
+	sort.Slice(out, func(i, j int) bool { return out[i].page < out[j].page })
+	return out
+}
+
+// waiting returns the deferred pages whose threshold is at or after redo,
+// in page order: those a checkpoint at redo will not free.
+func (l *Logger) waiting(redo LSN) []deferredFree {
+	l.freeMu.Lock()
+	defer l.freeMu.Unlock()
+	var out []deferredFree
+	for p, lsn := range l.pending {
+		if LSN(lsn) >= redo {
+			out = append(out, deferredFree{p, lsn})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].page < out[j].page })
 	return out
 }
 

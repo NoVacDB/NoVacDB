@@ -81,13 +81,13 @@ next:
 			if !ix.Unique {
 				continue
 			}
-			key, err := ix.Key(row, storage.RID{})
-			if err != nil {
-				return added, err
+			key, ok := ix.UniquePrefix(row)
+			if !ok {
+				continue
 			}
-			if _, dup, err := ix.Tree.Get(bg, key); err != nil {
+			if rids, err := ix.Lookup(bg, key); err != nil {
 				return added, err
-			} else if dup {
+			} else if len(rids) > 0 {
 				continue next
 			}
 		}
@@ -207,12 +207,13 @@ func (r *rdb) statement(crash bool) (sqlErrors int) {
 		r.reopen()
 		return sqlErrors
 	}
-	lsn, err := r.d.e.CommitStatement(bg)
-	if err != nil {
+	// Dropped pages are freed later, as the executor does: the request is
+	// logged inside the statement group.
+	if err := r.d.e.Logger().DeferFree(bg, free...); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range free {
-		r.d.e.Logger().DeferFree(p, uint64(lsn))
+	if _, err := r.d.e.CommitStatement(bg); err != nil {
+		t.Fatal(err)
 	}
 	r.state, r.rows = describeAll(r.d.c), rows
 	return sqlErrors

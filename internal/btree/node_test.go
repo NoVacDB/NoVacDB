@@ -190,7 +190,7 @@ func TestNodeCapacity(t *testing.T) {
 		t.Fatalf("eighth max internal cell: %v", err)
 	}
 	// The design doc's numbers.
-	if maxLeafCell+slotSize != 1542 || nodeSpace != 8144 || underfullSize != 2036 {
+	if maxLeafCell+slotSize != 1543 || nodeSpace != 8144 || underfullSize != 2036 {
 		t.Fatalf("limits changed: %d %d %d", maxLeafCell+slotSize, nodeSpace, underfullSize)
 	}
 	// Exactly full: a cell that fits to the byte.
@@ -425,7 +425,7 @@ func TestNodeValidateRejectsNestedCells(t *testing.T) {
 	// Cell B lies inside cell A's value, with a valid header of its own and
 	// a key that sorts after A's: only the overlap check can catch it.
 	n := newNodeBuf(t, true, 0)
-	inner := []byte{1, 0, 0, 0, 'z'} // key "z", empty value
+	inner := []byte{1, 0, 0, 0, 0, 'z'} // key "z", empty value, no flags
 	if err := n.insertLeaf(0, nil, inner); err != nil {
 		t.Fatal(err)
 	}
@@ -440,5 +440,27 @@ func TestNodeValidateRejectsNestedCells(t *testing.T) {
 	}
 	if err := n.validate(); !errors.Is(err, ErrCorruptNode) {
 		t.Fatalf("validate = %v", err)
+	}
+}
+
+func TestLeafFlagsAreZeroAndChecked(t *testing.T) {
+	n := newNodeBuf(t, true, 0)
+	if err := n.insertLeaf(0, []byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if f := n.b[n.slot(0)+leafOffFlags]; f != 0 {
+		t.Fatalf("flags %#x", f)
+	}
+	for _, f := range []byte{1, 0x80, 0xff} {
+		n.b[n.slot(0)+leafOffFlags] = f
+		if _, err := n.key(0); !errors.Is(err, ErrCorruptNode) {
+			t.Errorf("flags %#x: key = %v", f, err)
+		}
+		if _, err := n.value(0); !errors.Is(err, ErrCorruptNode) {
+			t.Errorf("flags %#x: value = %v", f, err)
+		}
+		if err := n.validate(); !errors.Is(err, ErrCorruptNode) {
+			t.Errorf("flags %#x: validate = %v", f, err)
+		}
 	}
 }

@@ -214,9 +214,15 @@ func (c *Catalog) CreateIndex(ctx context.Context, t *Table, name string, cols [
 	return c.createIndex(ctx, t, name, pos, unique, false)
 }
 
+// indexEntry is a row's entry for an index, and for a unique index the
+// prefix that must be unique (nil if the row has a NULL in it).
+type indexEntry struct {
+	key, value, unique []byte
+}
+
 // rowEntries reads every row of t and returns each one's entry for ix.
-func (c *Catalog) rowEntries(ctx context.Context, ix *Index) ([][2][]byte, error) {
-	var out [][2][]byte
+func (c *Catalog) rowEntries(ctx context.Context, ix *Index) ([]indexEntry, error) {
+	var out []indexEntry
 	s := ix.Table.Heap.Scan()
 	colTypes := ix.Table.Types()
 	for {
@@ -235,7 +241,11 @@ func (c *Catalog) rowEntries(ctx context.Context, ix *Index) ([][2][]byte, error
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, [2][]byte{key, EncodeRID(rid)})
+		e := indexEntry{key: key, value: EncodeRID(rid)}
+		if ix.Unique {
+			e.unique, _ = ix.UniquePrefix(row)
+		}
+		out = append(out, e)
 	}
 }
 
@@ -248,18 +258,21 @@ func (c *Catalog) createIndex(ctx context.Context, t *Table, name string, cols [
 	if unique {
 		seen := map[string]bool{}
 		for _, e := range entries {
-			if seen[string(e[0])] {
-				return nil, sqlerr.New(sqlerr.UniqueViolation, "could not create unique index %q", name).
-					WithDetail("Key %s is duplicated.", ix.DescribeKey(e[0]))
+			if e.unique == nil {
+				continue // a NULL never conflicts
 			}
-			seen[string(e[0])] = true
+			if seen[string(e.unique)] {
+				return nil, sqlerr.New(sqlerr.UniqueViolation, "could not create unique index %q", name).
+					WithDetail("Key %s is duplicated.", ix.DescribeKey(e.unique))
+			}
+			seen[string(e.unique)] = true
 		}
 	}
 	if ix.Tree, err = c.e.CreateBTree(ctx); err != nil {
 		return nil, err
 	}
 	for _, e := range entries {
-		if err := ix.Tree.Insert(ctx, e[0], e[1]); err != nil {
+		if err := ix.Tree.Insert(ctx, e.key, e.value); err != nil {
 			return nil, err
 		}
 	}
@@ -368,25 +381,74 @@ func KeyPrefix(vals []types.Value) []byte {
 }
 
 // Key returns the index key of a table row stored at rid: the indexed
-// columns, followed by the RID unless the index is unique and none of them
-// is NULL (docs/design/10-executor.md section 2.3). A key too large for the
-// B+Tree is a 54000 error.
+// columns followed by the RID, in every index, unique or not, so that two
+// entries with equal columns can coexist (as Phase 6 needs for row versions;
+// docs/design/08-btree.md section 2.11). A unique index enforces uniqueness
+// on the columns with a prefix probe (UniquePrefix, Lookup). A key too large
+// for the B+Tree is a 54000 error.
 func (ix *Index) Key(row []types.Value, rid storage.RID) ([]byte, error) {
 	var key []byte
-	hasNull := false
 	for _, p := range ix.Columns {
 		key = types.AppendKey(key, row[p])
-		hasNull = hasNull || row[p].Null
 	}
-	if !ix.Unique || hasNull {
-		key = btree.AppendInt64(key, int64(rid.Page))
-		key = btree.AppendInt64(key, int64(rid.Slot))
-	}
+	key = btree.AppendInt64(key, int64(rid.Page))
+	key = btree.AppendInt64(key, int64(rid.Slot))
 	if len(key) > btree.MaxKeySize {
 		return nil, sqlerr.New(sqlerr.ProgramLimitExceeded, "index row size %d exceeds the maximum of %d for index %q", len(key), btree.MaxKeySize, ix.Name).
 			WithHint("Values in indexed columns must be short; index a shorter column or a prefix of it.")
 	}
 	return key, nil
+}
+
+// UniquePrefix returns the part of a row's key that a unique index keeps
+// unique: the encoded columns. ok is false if any of them is NULL, as NULLs
+// are never equal to each other and never conflict.
+func (ix *Index) UniquePrefix(row []types.Value) (prefix []byte, ok bool) {
+	for _, p := range ix.Columns {
+		if row[p].Null {
+			return nil, false
+		}
+		prefix = types.AppendKey(prefix, row[p])
+	}
+	return prefix, true
+}
+
+// Lookup returns the RIDs of the entries whose columns encode to prefix (a
+// UniquePrefix or KeyPrefix of all the index's columns).
+func (ix *Index) Lookup(ctx context.Context, prefix []byte) ([]storage.RID, error) {
+	end := btree.Bound{}
+	if s := KeySuccessor(prefix); s != nil {
+		end = btree.Excl(s)
+	}
+	it := ix.Tree.Scan(btree.Incl(prefix), end)
+	var out []storage.RID
+	for {
+		_, v, ok, err := it.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return out, nil
+		}
+		rid, err := DecodeRID(v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rid)
+	}
+}
+
+// KeySuccessor returns the smallest key greater than every key that starts
+// with p, or nil if there is none (p is empty or all 0xff).
+func KeySuccessor(p []byte) []byte {
+	s := bytes.Clone(p)
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] < 0xff {
+			s[i]++
+			return s[:i+1]
+		}
+	}
+	return nil
 }
 
 // DescribeKey renders an index key as PostgreSQL does in messages:

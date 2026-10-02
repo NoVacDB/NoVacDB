@@ -100,33 +100,25 @@ func (st *stmt) checkUnique(tbl *catalog.Table, changes []change) error {
 			continue
 		}
 		keys := map[string]bool{}
-	rows:
 		for _, c := range changes {
 			if c.new == nil {
 				continue
 			}
-			for _, p := range ix.Columns {
-				if c.new[p].Null {
-					continue rows
-				}
-			}
-			key, err := ix.Key(c.new, storage.RID{})
-			if err != nil {
-				return err
+			key, ok := ix.UniquePrefix(c.new)
+			if !ok {
+				continue // a NULL never conflicts
 			}
 			dup := keys[string(key)]
 			keys[string(key)] = true
 			if !dup {
-				v, found, err := ix.Tree.Get(st.ctx, key)
+				// Existing entries with these columns conflict unless their
+				// row is one this statement changes (and so loses them).
+				rids, err := ix.Lookup(st.ctx, key)
 				if err != nil {
 					return err
 				}
-				if found {
-					rid, err := catalog.DecodeRID(v)
-					if err != nil {
-						return err
-					}
-					dup = !updated[rid]
+				for _, rid := range rids {
+					dup = dup || !updated[rid]
 				}
 			}
 			if dup {
@@ -201,7 +193,7 @@ func (st *stmt) write(tbl *catalog.Table, changes []change) error {
 	if err := st.ctx.Err(); err != nil {
 		return err
 	}
-	_, err := st.apply(false, func(ctx context.Context) error { return applyChanges(ctx, tbl, changes) })
+	err := st.apply(false, func(ctx context.Context) error { return applyChanges(ctx, tbl, changes) })
 	return err
 }
 

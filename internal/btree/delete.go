@@ -28,8 +28,11 @@ func (t *Tree) Delete(ctx context.Context, key []byte) (bool, error) {
 	// Pages are freed once nothing is latched: no one can reach them. In a
 	// logged tree only once no record that refers to them can be replayed.
 	for _, f := range freed {
+		if t.onUnlink != nil {
+			t.onUnlink(f.page, f.lsn)
+		}
 		if t.lg != nil {
-			t.lg.DeferFree(f.page, f.lsn)
+			err = errors.Join(err, t.lg.DeferFree(ctx, f.page))
 		} else {
 			err = errors.Join(err, t.freePage(ctx, f.page))
 		}
@@ -223,6 +226,9 @@ func (t *Tree) repair(ctx context.Context, p, x held) (held, unlinked, error) {
 			return x, unlinked{}, err
 		}
 		t.ops.merges[kindIndex(l.n)].Add(1)
+		if x.pos != 0 {
+			t.ops.leftMerges[kindIndex(l.n)].Add(1)
+		}
 		release(r.ref, true)
 		return l, unlinked{r.ref.ID(), lsn}, nil
 	}

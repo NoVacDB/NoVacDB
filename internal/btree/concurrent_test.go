@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // concModel is a model shared by concurrent writers. A writer locks a key's
@@ -267,4 +269,187 @@ func TestConcurrentWritersOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	runConcurrent(t, tr, 8, 0, 0, opsBudget(t)/15, 100)
+}
+
+func TestConcurrentLeftSiblingRepairs(t *testing.T) {
+	// Repairs of a node that is not its parent's first child latch the
+	// left sibling after the node itself, against the usual left-to-right
+	// order (design doc section 2.9). Deleters empty the right part of
+	// every leaf group, so their leaves repair with their left siblings,
+	// while inserters write into those left siblings and readers and
+	// scanners run through both. A watchdog fails the test if it stalls.
+	for _, logged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("logged=%v", logged), func(t *testing.T) {
+			var tr *Tree
+			var err error
+			if logged {
+				e := newLoggedEnv(t, 96)
+				tr, err = Create(bg, e.bp, WithLogger(e.lg))
+			} else {
+				tr, err = Create(bg, newPool(t, 96))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := testSeed(t)
+			const groups, perGroup, pad = 24, 256, 120
+			key := func(g, i int) []byte {
+				return append(binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint32([]byte{'k'}, uint32(g)), uint32(i)), make([]byte, pad)...)
+			}
+			// The first half of group g's keys is "left" (even keys stay,
+			// odd ones come and go); the second half is "right", deleted
+			// from its end and reinserted, round after round.
+			cm := &concModel{m: model{}}
+			for g := range groups {
+				for i := range perGroup {
+					if i%2 == 0 || i >= perGroup/2 {
+						k := key(g, i)
+						if err := tr.Insert(bg, k, []byte("v")); err != nil {
+							t.Fatal(err)
+						}
+						cm.m[string(k)] = []byte("v")
+					}
+				}
+			}
+			before := tr.opCounts()
+			var stop atomic.Bool
+			var wg, rg sync.WaitGroup
+			errc := make(chan error, 16)
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-done:
+				case <-time.After(2 * time.Minute):
+					buf := make([]byte, 1<<20)
+					n := runtime.Stack(buf, true)
+					errc <- fmt.Errorf("stalled (deadlock?); goroutines:\n%s", buf[:n])
+					stop.Store(true)
+				}
+			}()
+			for w := range 4 {
+				wg.Add(1)
+				go func() { // deleters and re-inserters of right halves
+					defer wg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(w)))
+					for round := 0; round < 8 && !stop.Load(); round++ {
+						for g := w; g < groups; g += 4 {
+							for i := perGroup - 1; i >= perGroup/2; i-- {
+								k := key(g, i)
+								mu := cm.stripe(k)
+								mu.Lock()
+								var err error
+								if round%2 == 0 {
+									var found bool
+									found, err = tr.Delete(bg, k)
+									if err == nil && found {
+										cm.mu.Lock()
+										delete(cm.m, string(k))
+										cm.mu.Unlock()
+									}
+								} else if rng.IntN(4) > 0 {
+									if err = tr.Insert(bg, k, []byte("r")); err == nil {
+										cm.mu.Lock()
+										cm.m[string(k)] = []byte("r")
+										cm.mu.Unlock()
+									}
+								}
+								mu.Unlock()
+								if err != nil {
+									errc <- err
+									return
+								}
+							}
+						}
+					}
+				}()
+			}
+			for w := range 2 {
+				wg.Add(1)
+				go func() { // inserters and deleters of the left halves' odd keys
+					defer wg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(100+w)))
+					for range 3000 {
+						if stop.Load() {
+							return
+						}
+						k := key(rng.IntN(groups), 1+2*rng.IntN(perGroup/4))
+						mu := cm.stripe(k)
+						mu.Lock()
+						cm.mu.Lock()
+						_, present := cm.m[string(k)]
+						cm.mu.Unlock()
+						var err error
+						if present {
+							if _, err = tr.Delete(bg, k); err == nil {
+								cm.mu.Lock()
+								delete(cm.m, string(k))
+								cm.mu.Unlock()
+							}
+						} else if err = tr.Insert(bg, k, []byte("l")); err == nil {
+							cm.mu.Lock()
+							cm.m[string(k)] = []byte("l")
+							cm.mu.Unlock()
+						}
+						mu.Unlock()
+						if err != nil {
+							errc <- err
+							return
+						}
+					}
+				}()
+			}
+			for r := range 3 {
+				rg.Add(1)
+				go func() { // readers of the never-deleted keys, and scanners
+					defer rg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(200+r)))
+					for !stop.Load() {
+						k := key(rng.IntN(groups), 2*rng.IntN(perGroup/4))
+						v, ok, err := tr.Get(bg, k)
+						if err != nil {
+							errc <- err
+							return
+						}
+						if !ok || string(v) != "v" {
+							errc <- fmt.Errorf("Get of a stable key: %q, %v", v, ok)
+							return
+						}
+						it := tr.Scan(Incl(key(rng.IntN(groups), 0)), Bound{})
+						var prev []byte
+						for n := 0; n < 200; n++ {
+							k, _, ok, err := it.Next(bg)
+							if err != nil {
+								errc <- err
+								return
+							}
+							if !ok {
+								break
+							}
+							if prev != nil && bytes.Compare(prev, k) >= 0 {
+								errc <- fmt.Errorf("scan out of order")
+								return
+							}
+							prev = k
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			stop.Store(true)
+			rg.Wait()
+			close(done)
+			close(errc)
+			for err := range errc {
+				t.Fatal(err)
+			}
+			cm.m.verify(t, tr)
+			c := tr.opCounts()
+			merges := c.leftMerges[0] - before.leftMerges[0]
+			redist := c.redist[0][1] - before.redist[0][1]
+			t.Logf("left-sibling repairs of leaves: %d merges, %d redistributions (%+v)", merges, redist, c)
+			if merges < 50 || redist < 5 {
+				t.Fatalf("only %d merges and %d redistributions with a left sibling: the test misses its target", merges, redist)
+			}
+		})
+	}
 }

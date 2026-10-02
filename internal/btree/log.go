@@ -18,9 +18,10 @@ type Logger interface {
 	// current redo point, which cannot change before the append. If it
 	// fails, the record must be treated as possibly logged.
 	LogBTree(ctx context.Context, build func(redoPoint uint64) []byte) (uint64, error)
-	// DeferFree asks for page to be freed once no record at or before lsn
-	// can be replayed: after a checkpoint whose redo point is past lsn.
-	DeferFree(page, lsn uint64)
+	// DeferFree asks for pages to be freed once no record that refers to
+	// them can be replayed. It is called after the record that unlinked
+	// them, and logs the request so that it survives a crash.
+	DeferFree(ctx context.Context, pages ...uint64) error
 }
 
 // ErrBadRecord means a B+Tree WAL record is malformed, or cannot be replayed

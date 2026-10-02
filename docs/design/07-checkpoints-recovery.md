@@ -72,12 +72,12 @@ A **control file** `control` (section 3) in the database directory records the l
 
 `Checkpoint(ctx)`:
 
-1. Under the `Logger`'s write lock: redo point ← `Writer.EndLSN()`.
+1. Under the `Logger`'s write lock: redo point ← `Writer.EndLSN()`. Then (since 08-btree.md revision 2) every page still waiting to be freed whose threshold is at or after the redo point is logged again in deferred-free records (type 6), so the log from the redo point names all of them.
 2. `BufferPool.FlushAll`: every page dirty before the redo point is written, forcing the log as needed through the hook. Pages dirtied meanwhile may be written too; that is harmless.
 3. `DiskManager.Sync`: those writes are durable.
 4. Append a checkpoint record (payload: the redo LSN) and flush the log up to it.
 5. Write the control file.
-6. Free the pages B+Trees unlinked by records before the redo LSN (Phase 3, see 08-btree.md section 2.7): no record that refers to them can be replayed any more.
+6. Free the pages waiting with a threshold before the redo LSN (pages B+Trees unlinked, and dropped tables' and indexes'; 08-btree.md section 2.7): no record that refers to them can be replayed any more.
 7. Delete log segments that end at or before the redo LSN (never the current segment), and fsync the directory.
 
 A crash at any point leaves the previous control file in force. Its redo point is still in the log, because segments are deleted only after step 5. Only one checkpoint runs at a time.
@@ -93,7 +93,7 @@ A crash at any point leaves the previous control file in force. Its redo point i
    - If the control file exists, read the checkpoint record it names and require it to be a checkpoint record carrying the same redo LSN; otherwise `ErrCorrupt`.
    - If there is no control file, replay from the first record. That is only allowed if the log still starts at LSN 0; a trimmed log without a control file is `ErrCorrupt`.
 3. Create the buffer pool with both WAL hooks, and a `Logger` whose redo point is that redo LSN.
-4. **Redo:** read every record from the redo LSN to the end (`wal.Reader`). Heap records go to `storage.RedoHeapRecord`, checkpoint records are skipped, and anything else is `ErrCorrupt`. (Since Step 4.4 a first pass finds statement groups that never committed, and their records are skipped too; see 10-executor.md section 2.4.) Each block is redone:
+4. **Redo:** read every record from the redo LSN to the end (`wal.Reader`). Heap records go to `storage.RedoHeapRecord`, checkpoint records are skipped, and anything else is `ErrCorrupt`. (Since Step 4.4 a first pass finds statement groups that never committed, and their records are skipped too; see 10-executor.md section 2.4. Deferred-free records put their pages back on the list of pages to free, which the end-of-recovery checkpoint then frees; a record naming a page past the end of the data file is `ErrCorrupt`. See 08-btree.md section 2.7.) Each block is redone:
    - An image is installed unconditionally (via `PinForOverwrite`) and stamped with the record's LSN.
    - An operation is applied only if the page's LSN is lower than the record's (otherwise the page already contains it), then stamped.
    - Replay is sequential and in LSN order, so replaying again after a crash during recovery gives the same result.
@@ -142,7 +142,7 @@ It does not remember which heaps exist; that is the catalog (Step 4.4). Its call
 
 All integers little-endian.
 
-**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint, `3` B+Tree change (format in 08-btree.md), `4` statement begin and `5` statement commit (format and meaning in 10-executor.md, sections 2.4 and 3).
+**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint, `3` B+Tree change (format in 08-btree.md), `4` statement begin and `5` statement commit (format and meaning in 10-executor.md, sections 2.4 and 3), `6` deferred free (format in 08-btree.md section 3).
 
 **Heap record payload** (the WAL record's payload, type 1):
 

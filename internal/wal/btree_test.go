@@ -110,8 +110,13 @@ func TestCheckpointFreesDeferredPagesAfterTheRedoPoint(t *testing.T) {
 	if e.dm.FreePageCount() != freeBefore {
 		t.Fatal("pages were freed before a checkpoint")
 	}
-	// A page unlinked after the next redo point must wait.
-	e.Logger().DeferFree(999_999, uint64(e.w.EndLSN())+1)
+	// A page unlinked after the next redo point must wait (an unused page,
+	// so that freeing it later is harmless).
+	waiting, err := e.dm.Allocate(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Logger().restore(waiting, uint64(e.w.EndLSN())+1)
 	if _, err := e.Checkpoint(bg); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +126,6 @@ func TestCheckpointFreesDeferredPagesAfterTheRedoPoint(t *testing.T) {
 	if e.Logger().PendingFrees() != 1 {
 		t.Fatalf("%d pages pending, want the one unlinked after the redo point", e.Logger().PendingFrees())
 	}
-	e.Logger().takeFreeable(LSN(1 << 62)) // drop the made-up page before Close frees it
 	// The tree is intact, the pages are reused, and all of it survives a
 	// crash.
 	pages := e.dm.PageCount()
@@ -163,7 +167,7 @@ func TestCheckpointKeepsDeferredPagesItCannotFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.Logger().DeferFree(tr.Root(), 0)
+	e.Logger().restore(tr.Root(), 0)
 	if _, err := e.Checkpoint(bg); err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +180,8 @@ func TestCheckpointKeepsDeferredPagesItCannotFree(t *testing.T) {
 	e.Logger().takeFreeable(LSN(1 << 62))
 	// A page that cannot be freed at all fails the checkpoint, and it and
 	// the pages after it stay on the list.
-	e.Logger().DeferFree(e.dm.PageCount()+10, 0)
-	e.Logger().DeferFree(e.dm.PageCount()+11, 0)
+	e.Logger().restore(e.dm.PageCount()+10, 0)
+	e.Logger().restore(e.dm.PageCount()+11, 0)
 	if _, err := e.Checkpoint(bg); err == nil {
 		t.Fatal("freeing a page past the end of the file succeeded")
 	}

@@ -25,6 +25,9 @@ type Tree struct {
 	root uint64
 	lg   Logger // nil: changes are not logged
 	ops  counters
+	// onUnlink, if set (by tests), is told each page a merge or collapse
+	// unlinks and the LSN of the record that did it.
+	onUnlink func(page, lsn uint64)
 }
 
 // Option configures a Tree.
@@ -38,6 +41,7 @@ func WithLogger(lg Logger) Option { return func(t *Tree) { t.lg = lg } }
 // exercised (and, later, for metrics). Index 0 is leaves, 1 internal nodes.
 type counters struct {
 	splits, rootSplits, merges [2]atomic.Uint64
+	leftMerges                 [2]atomic.Uint64    // merges of an underfull node into its left sibling
 	redistributions            [2][2]atomic.Uint64 // [kind][0: to the left, 1: to the right]
 	collapses                  atomic.Uint64
 	deletes, latchesAtLeaf     atomic.Uint64 // how much of the path deletes keep latched

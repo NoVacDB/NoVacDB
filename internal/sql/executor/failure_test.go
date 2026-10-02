@@ -234,9 +234,17 @@ func TestCheckpointsFollowWALGrowth(t *testing.T) {
 	if db.lastCkpt == start {
 		t.Fatal("no checkpoint after 15 KiB of rows")
 	}
+	gone, _ := db.cat.Table("gone")
+	dropped := uint64(len(gone.Heap.Pages()))
+	free := db.e.FreePageCount()
 	mustExec(t, db, "DROP TABLE gone")
-	if db.e.Logger().PendingFrees() == 0 {
-		t.Fatal("dropping a table queued no pages")
+	// The pages are freed by the first checkpoint whose redo point is past
+	// the drop: perhaps the one its own commit triggered, else this one.
+	if _, err := db.e.Checkpoint(bg); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.e.FreePageCount() - free; got != dropped || db.e.Logger().PendingFrees() != 0 {
+		t.Fatalf("%d pages freed and %d pending; the dropped table had %d", got, db.e.Logger().PendingFrees(), dropped)
 	}
 	for i := range 100 {
 		mustExec(t, db, fmt.Sprintf("INSERT INTO t VALUES (%d)", i))
@@ -372,4 +380,35 @@ func TestOpenFailures(t *testing.T) {
 	if _, err := Open(bg, m, dir, Options{}); sqlerr.Code(err) != sqlerr.DataCorrupted {
 		t.Fatalf("open with a damaged catalog: %v", err)
 	}
+}
+
+func TestDroppedPagesAreFreedAfterACrash(t *testing.T) {
+	m := newFS(t)
+	db := openDB(t, m, Options{Frames: 64, CheckpointBytes: 1 << 40})
+	mustExec(t, db, "CREATE TABLE gone (a int PRIMARY KEY, pad text)")
+	for i := range 40 {
+		mustExec(t, db, fmt.Sprintf("INSERT INTO gone VALUES (%d, '%0300d')", i, i))
+	}
+	if _, err := db.e.Checkpoint(bg); err != nil {
+		t.Fatal(err)
+	}
+	gone, _ := db.cat.Table("gone")
+	pages, err := gone.PrimaryKey().Tree.Pages(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped := uint64(len(gone.Heap.Pages()) + len(pages))
+	free := db.e.FreePageCount()
+	mustExec(t, db, "DROP TABLE gone")
+	if db.e.FreePageCount() != free {
+		t.Fatal("pages were freed before a checkpoint")
+	}
+	// The power goes before any checkpoint: the request is in the log.
+	m.Crash(vfs.CrashOptions{TearLast: true})
+	db = openDB(t, m, Options{})
+	defer func() { _ = db.Close(bg) }()
+	if got := db.e.FreePageCount() - free; got != dropped {
+		t.Fatalf("%d pages freed after recovery; the dropped table had %d", got, dropped)
+	}
+	expectErr(t, db, "SELECT * FROM gone", sqlerr.UndefinedTable)
 }

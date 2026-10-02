@@ -57,6 +57,13 @@ func (c *Checkpointer) Checkpoint(ctx context.Context) (Control, error) {
 	defer c.mu.Unlock()
 	// 1. From here on, the first change to any page logs an image.
 	redo := c.lg.BeginCheckpoint()
+	// Pages waiting to be freed that this checkpoint will not free are
+	// logged again after the redo point, so that recovery from it still
+	// knows them (docs/design/08-btree.md section 2.7). Those it will free
+	// are not: once its control file exists, nothing may name them again.
+	if err := c.relogWaiting(ctx, redo); err != nil {
+		return Control{}, fmt.Errorf("checkpoint: %w", err)
+	}
 	// 2. Write every page that was dirty before the redo point (forcing the
 	// log as needed), and 3. make the writes durable.
 	if err := c.pages.FlushAll(ctx); err != nil {
@@ -99,15 +106,33 @@ func (c *Checkpointer) freeDeferred(ctx context.Context, redo LSN) error {
 	for i, d := range pending {
 		err := c.pages.DeletePage(ctx, d.page)
 		if errors.Is(err, storage.ErrPagePinned) {
-			c.lg.DeferFree(d.page, d.lsn)
+			c.lg.restore(d.page, d.lsn)
 			continue
 		}
 		if err != nil {
 			for _, rest := range pending[i:] {
-				c.lg.DeferFree(rest.page, rest.lsn)
+				c.lg.restore(rest.page, rest.lsn)
 			}
 			return fmt.Errorf("freeing page %d: %w", d.page, err)
 		}
+	}
+	return nil
+}
+
+// relogWaiting logs again, with their thresholds, the deferred pages that
+// a checkpoint at redo will not free.
+func (c *Checkpointer) relogWaiting(ctx context.Context, redo LSN) error {
+	waiting := c.lg.waiting(redo)
+	for len(waiting) > 0 {
+		n := min(len(waiting), MaxDeferredPerRecord)
+		pages, lsns := make([]uint64, n), make([]uint64, n)
+		for i, d := range waiting[:n] {
+			pages[i], lsns[i] = d.page, d.lsn
+		}
+		if _, err := c.w.Append(ctx, RecordDeferredFree, EncodeDeferredFree(pages, lsns)); err != nil {
+			return fmt.Errorf("logging deferred frees again: %w", err)
+		}
+		waiting = waiting[n:]
 	}
 	return nil
 }

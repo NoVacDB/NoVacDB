@@ -41,6 +41,9 @@ type RecoveryStats struct {
 	// which recovery left out.
 	DiscardedStatements int
 	Discarded           int
+	// Entries of deferred-free records replayed (pages put back on the
+	// list to free).
+	DeferredFrees int
 }
 
 // ErrStatement means a statement-group call was made out of order.
@@ -138,10 +141,12 @@ func (e *Engine) open(ctx context.Context, opts EngineOptions) error {
 	if e.bp, err = storage.NewBufferPool(e.dm, storage.Options{Frames: opts.Frames, FlushedLSN: clamped, FlushWAL: force}); err != nil {
 		return err
 	}
+	// The logger exists before replay so that replayed deferred-free
+	// records can put their pages back on its list.
+	e.lg = NewLogger(e.w, redo)
 	if err := e.replay(ctx, walDir, redo); err != nil {
 		return err
 	}
-	e.lg = NewLogger(e.w, redo)
 	e.ck = NewCheckpointer(e.fsys, e.dir, e.w, e.lg, e.bp, e.dm)
 	// End-of-recovery checkpoint: the replayed pages reach disk and the
 	// next recovery starts here.
@@ -238,6 +243,20 @@ func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
 				return fmt.Errorf("replay: %w: %w", ErrCorrupt, err)
 			}
 			e.rec.Replayed++
+		case RecordDeferredFree:
+			// Pages waiting to be freed: back on the list.
+			frees, err := DecodeDeferredFree(rec.Payload, rec.LSN)
+			if err != nil {
+				return fmt.Errorf("replay: record %d: %w", rec.LSN, err)
+			}
+			for _, d := range frees {
+				// The page was allocated before whatever unlinked it.
+				if d.page >= e.dm.PageCount() {
+					return fmt.Errorf("replay: record %d defers page %d, past the end of the data file: %w", rec.LSN, d.page, ErrCorrupt)
+				}
+				e.lg.restore(d.page, d.lsn)
+			}
+			e.rec.DeferredFrees += len(frees)
 		case RecordCheckpoint, RecordStmtBegin, RecordStmtCommit:
 			// Nothing to redo.
 		default:
@@ -350,6 +369,9 @@ func (e *Engine) OpenBTree(ctx context.Context, root uint64) (*btree.Tree, error
 
 // Logger returns the engine's logger.
 func (e *Engine) Logger() *Logger { return e.lg }
+
+// FreePageCount returns how many pages of the data file are free.
+func (e *Engine) FreePageCount() uint64 { return e.dm.FreePageCount() }
 
 // Flush makes every change made so far durable; it is the point at which
 // changes are acknowledged (later, COMMIT).

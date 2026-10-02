@@ -252,7 +252,7 @@ func (db *DB) tooMuch(err error) *sqlerr.Error {
 }
 
 // apply runs fn, the change phase of a statement, in a statement group and
-// commits it, returning the commit LSN. The caller holds the exclusive
+// commits it. The caller holds the exclusive
 // lock and has already checked everything that can fail for SQL reasons.
 //
 // If anything fails once the group has begun, the changes cannot be undone
@@ -263,26 +263,26 @@ func (db *DB) tooMuch(err error) *sqlerr.Error {
 //
 // Cancellation is not honoured from here on: a statement that has begun
 // changing data runs to its end.
-func (st *stmt) apply(ddl bool, fn func(ctx context.Context) error) (wal.LSN, error) {
+func (st *stmt) apply(ddl bool, fn func(ctx context.Context) error) error {
 	db := st.db
 	ctx := context.WithoutCancel(st.ctx)
 	if err := db.e.BeginStatement(ctx); err != nil {
-		return 0, db.restart(ctx, err)
+		return db.restart(ctx, err)
 	}
 	ferr := fn(ctx)
 	var se *sqlerr.Error
 	if ferr != nil && (!ddl || !errors.As(ferr, &se)) {
-		return 0, db.restart(ctx, ferr)
+		return db.restart(ctx, ferr)
 	}
 	lsn, err := db.e.CommitStatement(ctx)
 	if err != nil {
-		return 0, db.restart(ctx, err)
+		return db.restart(ctx, err)
 	}
 	if ferr != nil {
-		return 0, ferr
+		return ferr
 	}
 	db.maybeCheckpoint(ctx, lsn)
-	return lsn, nil
+	return nil
 }
 
 // restart abandons the engine and reopens the database after a failed
