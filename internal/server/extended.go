@@ -10,7 +10,7 @@ import (
 )
 
 // statement is a prepared statement of a session (design doc section
-// 2.9).
+// 2.10).
 type statement struct {
 	p *executor.Prepared
 	// oids are the parameters' type OIDs as the client sees them: as it
@@ -107,7 +107,9 @@ func (cn *conn) parse(m pgwire.Parse) error {
 		}
 		declared[i] = t
 	}
-	p, err := cn.s.cfg.DB.Prepare(cn.s.ctx, m.Query, declared)
+	ctx, done := cn.statementContext()
+	p, err := cn.s.cfg.DB.Prepare(ctx, m.Query, declared)
+	done()
 	if err != nil {
 		return err
 	}
@@ -219,7 +221,9 @@ func (cn *conn) execute(m pgwire.Execute) error {
 	}
 	first := !p.ran
 	if first {
-		r, err := cn.s.cfg.DB.ExecPrepared(cn.s.ctx, p.st.p, p.values)
+		ctx, done := cn.statementContext()
+		r, err := cn.s.cfg.DB.ExecPrepared(ctx, p.st.p, p.values)
+		done()
 		if err != nil {
 			return err
 		}

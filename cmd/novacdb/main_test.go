@@ -23,14 +23,21 @@ func TestParseFlags(t *testing.T) {
 		want    config
 		wantErr error
 	}{
-		{"defaults", nil, config{dataDir: defaultDataDir, listen: defaultListen, port: defaultPort}, nil},
-		{"custom values", []string{"--data-dir", "/x", "--listen", "0.0.0.0", "--port", "6000"}, config{dataDir: "/x", listen: "0.0.0.0", port: 6000}, nil},
-		{"every interface", []string{"--listen", ""}, config{dataDir: defaultDataDir, listen: "", port: defaultPort}, nil},
-		{"minimum port", []string{"--port", "1"}, config{dataDir: defaultDataDir, listen: defaultListen, port: 1}, nil},
-		{"maximum port", []string{"--port", "65535"}, config{dataDir: defaultDataDir, listen: defaultListen, port: 65535}, nil},
+		{"defaults", nil, defaults(nil), nil},
+		{"custom values", []string{"--data-dir", "/x", "--listen", "0.0.0.0", "--port", "6000", "--max-connections", "7",
+			"--idle-timeout", "5m", "--shutdown-timeout", "2s"},
+			config{dataDir: "/x", listen: "0.0.0.0", port: 6000, maxConnections: 7, idleTimeout: 5 * time.Minute, shutdownTimeout: 2 * time.Second}, nil},
+		{"every interface", []string{"--listen", ""}, defaults(func(c *config) { c.listen = "" }), nil},
+		{"minimum port", []string{"--port", "1"}, defaults(func(c *config) { c.port = 1 }), nil},
+		{"maximum port", []string{"--port", "65535"}, defaults(func(c *config) { c.port = 65535 }), nil},
+		{"one connection", []string{"--max-connections", "1"}, defaults(func(c *config) { c.maxConnections = 1 }), nil},
+		{"stop at once", []string{"--shutdown-timeout", "0"}, defaults(func(c *config) { c.shutdownTimeout = 0 }), nil},
 		{"port zero", []string{"--port", "0"}, config{}, ErrInvalidPort},
 		{"port too large", []string{"--port", "65536"}, config{}, ErrInvalidPort},
 		{"negative port", []string{"--port", "-1"}, config{}, ErrInvalidPort},
+		{"no connections", []string{"--max-connections", "0"}, config{}, ErrInvalidMaxConnections},
+		{"negative idle timeout", []string{"--idle-timeout", "-1s"}, config{}, ErrNegativeDuration},
+		{"negative shutdown timeout", []string{"--shutdown-timeout", "-1s"}, config{}, ErrNegativeDuration},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,8 +52,17 @@ func TestParseFlags(t *testing.T) {
 	}
 }
 
+// defaults is the default config, changed by edit.
+func defaults(edit func(*config)) config {
+	c := config{dataDir: defaultDataDir, listen: defaultListen, port: defaultPort, maxConnections: 1000, shutdownTimeout: 30 * time.Second}
+	if edit != nil {
+		edit(&c)
+	}
+	return c
+}
+
 func TestParseFlagsRejectsGarbage(t *testing.T) {
-	for _, args := range [][]string{{"--port", "abc"}, {"--nope"}} {
+	for _, args := range [][]string{{"--port", "abc"}, {"--nope"}, {"--idle-timeout", "5"}, {"--max-connections", "x"}} {
 		if _, err := parseFlags(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("parseFlags(%v) succeeded, want error", args)
 		}
@@ -67,7 +83,7 @@ func TestRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if code := run(tc.args, &out, nil); code != tc.wantCode {
+			if code := run(tc.args, &out, nil, nil); code != tc.wantCode {
 				t.Fatalf("exit code = %d, want %d (output: %s)", code, tc.wantCode, out.String())
 			}
 			if !strings.Contains(out.String(), tc.wantOut) {
@@ -148,7 +164,7 @@ func TestRunServesUntilStopped(t *testing.T) {
 		var out syncBuffer
 		done := make(chan int, 1)
 		go func() {
-			done <- run([]string{"--data-dir", dir, "--listen", "127.0.0.1", "--port", strconv.Itoa(port)}, &out, stop)
+			done <- run([]string{"--data-dir", dir, "--listen", "127.0.0.1", "--port", strconv.Itoa(port)}, &out, stop, nil)
 		}()
 		got := handshake(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if got != "RSSSSSSSSSSSSSKZ" {
@@ -183,7 +199,7 @@ func TestRunFailures(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	var out syncBuffer
-	if code := run([]string{"--data-dir", t.TempDir(), "--listen", "127.0.0.1", "--port", port}, &out, nil); code != 1 || !strings.Contains(out.String(), "listening failed") {
+	if code := run([]string{"--data-dir", t.TempDir(), "--listen", "127.0.0.1", "--port", port}, &out, nil, nil); code != 1 || !strings.Contains(out.String(), "listening failed") {
 		t.Fatalf("busy port: code %d\n%s", code, out.String())
 	}
 	// A data directory that cannot be created.
@@ -192,7 +208,7 @@ func TestRunFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	out = syncBuffer{}
-	if code := run([]string{"--data-dir", filepath.Join(file, "data")}, &out, nil); code != 1 {
+	if code := run([]string{"--data-dir", filepath.Join(file, "data")}, &out, nil, nil); code != 1 {
 		t.Fatalf("bad data dir: code %d\n%s", code, out.String())
 	}
 }
@@ -202,5 +218,94 @@ func TestListeningBeyondThisMachineWarns(t *testing.T) {
 		if got := loopbackOnly(host); got != loopback {
 			t.Errorf("loopbackOnly(%q) = %v", host, got)
 		}
+	}
+}
+
+func TestRunShutsDownGracefully(t *testing.T) {
+	port := freePort(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	stop := make(chan struct{})
+	var out syncBuffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"--data-dir", filepath.Join(t.TempDir(), "data"), "--listen", "127.0.0.1", "--port", strconv.Itoa(port)}, &out, stop, nil)
+	}()
+	handshake(t, addr) // the server is up
+	// An idle session open across the shutdown.
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := c.Write(pgwire.EncodeStartup(pgwire.ProtocolVersion30, []pgwire.Param{{Name: "user", Value: "me"}})); err != nil {
+		t.Fatal(err)
+	}
+	rd := pgwire.NewReader(bufio.NewReader(c))
+	for {
+		typ, _, err := rd.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == 'Z' {
+			break
+		}
+	}
+	close(stop)
+	typ, body, err := rd.ReadMessage()
+	if err != nil || typ != 'E' || !bytes.Contains(body, []byte("C57P01\x00")) {
+		t.Fatalf("%q %q %v", typ, body, err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit code %d\n%s", code, out.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not stop")
+	}
+	if !strings.Contains(out.String(), "shutting down") || !strings.Contains(out.String(), "novacdb stopped") {
+		t.Fatal(out.String())
+	}
+}
+
+func TestRunIdleTimeout(t *testing.T) {
+	port := freePort(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	stop := make(chan struct{})
+	var out syncBuffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"--data-dir", filepath.Join(t.TempDir(), "data"), "--listen", "127.0.0.1", "--port", strconv.Itoa(port),
+			"--idle-timeout", "200ms"}, &out, stop, nil)
+	}()
+	handshake(t, addr)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := c.Write(pgwire.EncodeStartup(pgwire.ProtocolVersion30, []pgwire.Param{{Name: "user", Value: "me"}})); err != nil {
+		t.Fatal(err)
+	}
+	rd := pgwire.NewReader(bufio.NewReader(c))
+	for {
+		typ, body, err := rd.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The session's ReadyForQuery, then, after 200ms of silence, its
+		// end.
+		if typ == 'E' {
+			if !bytes.Contains(body, []byte("C57P05\x00")) {
+				t.Fatalf("%q", body)
+			}
+			break
+		}
+	}
+	close(stop)
+	if code := <-done; code != 0 {
+		t.Fatalf("exit code %d\n%s", code, out.String())
 	}
 }

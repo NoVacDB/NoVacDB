@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 5.3 — Extended query protocol** (design in `12-wire-protocol.md`)
+👉 **Phase 6 — Transactions and MVCC** (steps to be planned: the phase is outlined under "Later phases" and gets its step list and design doc first)
 
 ---
 
@@ -41,6 +41,8 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-02 | B+Tree revision 2 (review) | ✅ Done | Design doc 08 revised first and approved. Leaf cells gain a Flags byte (zero until Phase 6's delete marks), data file format version 2. Deferred frees are logged (WAL type 6), logged again by checkpoints and replayed by recovery, so they survive crashes; a scavenger is on the roadmap for the remaining leak windows. Every index entry, unique or not, now carries the RID; uniqueness by prefix probe. Deadlock-freedom argument corrected (repairs latch a left sibling after the node); new test aimed at left-sibling repairs under `-race` with a watchdog. A checkpoint failing at every write, sync and rename point never frees a page twice or a live page. Limitations and Phase 4 notes added. |
 | 2026-10-02 | 5.1 Startup and authentication | ✅ Done | Design doc `12-wire-protocol.md` (whole of Phase 5, reviewed and approved). `internal/pgwire`: framing with size limits (startup 10,000 bytes, messages 16 MiB, large bodies allocated as they arrive), startup packet, backend messages. `internal/server`: one goroutine per connection, SSL/GSS requests declined, protocol 3.0 with negotiation down from 3.x, PostgreSQL's startup-parameter rules, trust authentication, ParameterStatus, cancel keys, startup timeout, panic containment. `novacdb` now opens the database and serves on localhost:5433, stopping cleanly on SIGINT/SIGTERM. Verified with real `psql` 16 and `pg_isready`. Coverage 93% / 99%; 2 fuzz targets; 35 deliberate-bug checks, all caught. |
 | 2026-10-02 | 5.2 Simple query protocol | ✅ Done | Design section 2.8 of `12-wire-protocol.md`. `Query` runs through the executor: `RowDescription` with PostgreSQL's type OIDs and sizes, `DataRow` in text form (NULL as −1), `CommandComplete`, `EmptyQueryResponse`, `ErrorResponse` with SQLSTATE, position, detail and hint, notices with their codes; results sent in 64 KiB writes; extended-protocol messages answered with `0A000` and skipped to `Sync`. All 250 SQL logic records now also run over the wire. Found and fixed: `SELECT FROM t` lost its rows, select lists past 65,535 columns corrupted the stream (now PostgreSQL's 1664 limit, `54011`), and rows over 488 columns crashed the row encoder (a Step 4.3 bug). Verified with real `psql` 16. 29 deliberate-bug checks, all caught. |
+| 2026-10-02 | 5.3 Extended query protocol | ✅ Done | Design section 2.10 of `12-wire-protocol.md`. Executor `Prepare`/`ExecPrepared`: parameter types declared or inferred as untyped literals' would be, result columns described without running, parameters bound as constants (indexes used), "cached plan must not change result type" after schema changes. Server: Parse/Bind/Describe/Execute/Close/Flush/Sync, named and unnamed statements and portals, row limits with PortalSuspended, PostgreSQL's error codes with skip-to-Sync, binary formats for the six types (and declared smallint, real, varchar parameters). Found and fixed: an empty string first in a result could be sent as NULL. SQL logic files also run through the extended protocol with binary results; `FuzzPrepare`, `FuzzExtendedMessages`, `FuzzSession` (no contained panic for any input). Verified with `psql` `\bind`, `pgbench` in all three modes, pgx in all five execution modes, and JDBC 42.7. 63 deliberate-bug checks: 58 caught, 1 found redundant code (removed), 4 equivalent (lock mode, allocation bound, flush timing). |
+| 2026-10-02 | 5.4 Connections and end-to-end tests | ✅ Done | Design section 2.12. `--max-connections` (53300), `CancelRequest` with constant-time key check (57014, the session goes on), `--idle-timeout` (57P05), graceful shutdown on SIGINT/SIGTERM: idle sessions 57P01, starting ones 57P03, running statements finish up to `--shutdown-timeout`, a second signal stops at once, then the final checkpoint. Found by repetition and fixed: a connection woken by shutdown before its startup deadline was set waited out the whole timeout. `tests/e2e`: the real binary (race-detector build) driven by a protocol client and `psql`: the MVP flow, graceful restarts, and three SIGKILLs under concurrent writes with every acknowledged row recovered and indexes consistent. Cancel verified with pgx against a 300k-row sort. 2000 concurrent sessions measured at about 17 KB each on 9 OS threads (WORKFLOW problem 12 marked done). 25 deliberate-bug checks, all caught. Phase 5 and the MVP complete. |
 
 ---
 
@@ -169,14 +171,14 @@ TCP listener, `SSLRequest`/`GSSENCRequest` declined, startup message, trust auth
 ### ✅ Step 5.2 — Simple query protocol
 `Query` → `RowDescription`, `DataRow`, `CommandComplete`, `ErrorResponse` with correct SQLSTATE codes, `EmptyQueryResponse`. Type OIDs for supported types.
 
-### 👉 Step 5.3 — Extended query protocol
+### ✅ Step 5.3 — Extended query protocol
 `Parse`, `Bind`, `Describe`, `Execute`, `Sync`, `Close`, `Flush`. Text-format parameters first. Needed for parameterised queries from drivers.
 
-### ⬜ Step 5.4 — Connections and end-to-end tests
+### ✅ Step 5.4 — Connections and end-to-end tests
 Goroutine per connection, connection limit, graceful shutdown on signal, cancel requests. End-to-end tests using a minimal protocol client written in the test code, plus manual verification steps with `psql`.
 
-### 🎯 MVP milestone
-`psql -h localhost -p 5433` connects; tables can be created, filled, queried, updated, and deleted; data survives crashes.
+### ✅ 🎯 MVP milestone
+`psql -h localhost -p 5433` connects; tables can be created, filled, queried, updated, and deleted; data survives crashes. Reached: `tests/e2e` runs these steps against the real binary, with `psql` and with a protocol client, across graceful restarts and SIGKILLs.
 
 ---
 

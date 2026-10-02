@@ -11,7 +11,7 @@ import (
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/types"
 )
 
-// More type OIDs, accepted for parameters (design doc section 2.9).
+// More type OIDs, accepted for parameters (design doc section 2.10).
 const (
 	oidInt2    = 21
 	oidFloat4  = 700

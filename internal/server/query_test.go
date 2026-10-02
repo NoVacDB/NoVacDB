@@ -142,13 +142,14 @@ func TestQueryResults(t *testing.T) {
 	if got := dataRow(t, ms[1].body); len(got) != 0 {
 		t.Fatalf("row %q", got)
 	}
-	// Tags of the other statements.
-	for sql, want := range map[string]string{
-		"UPDATE t SET i = 5 WHERE i = 1": "UPDATE 1", "DELETE FROM t WHERE i IS NULL": "DELETE 1",
-		"CREATE INDEX ti ON t (i)": "CREATE INDEX", "DROP INDEX ti": "DROP INDEX",
+	// Tags of the other statements, in order (the index is dropped after
+	// it is made).
+	for _, c := range []struct{ sql, want string }{
+		{"UPDATE t SET i = 5 WHERE i = 1", "UPDATE 1"}, {"DELETE FROM t WHERE i IS NULL", "DELETE 1"},
+		{"CREATE INDEX ti ON t (i)", "CREATE INDEX"}, {"DROP INDEX ti", "DROP INDEX"},
 	} {
-		if ms := cl.query(sql); msgTypes(ms) != "CZ" || tag(ms[0]) != want {
-			t.Errorf("%s: %q %q", sql, msgTypes(ms), tag(ms[0]))
+		if ms := cl.query(c.sql); msgTypes(ms) != "CZ" || tag(ms[0]) != c.want {
+			t.Errorf("%s: %q %q", c.sql, msgTypes(ms), tag(ms[0]))
 		}
 	}
 }

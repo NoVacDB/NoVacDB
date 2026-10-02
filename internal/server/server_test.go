@@ -87,13 +87,19 @@ func dial(t *testing.T, addr string) *client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(stallLimit))
 	t.Cleanup(func() { _ = c.Close() })
 	return &client{t: t, c: c, br: bufio.NewReader(c)}
 }
 
+// stallLimit is how long a test client waits for progress: each send
+// allows this much more for it and the answers it reads, so a long test
+// on one connection is not cut short, and a hang still fails.
+const stallLimit = 10 * time.Second
+
 func (cl *client) send(b []byte) {
 	cl.t.Helper()
+	_ = cl.c.SetDeadline(time.Now().Add(stallLimit))
 	if _, err := cl.c.Write(b); err != nil {
 		cl.t.Fatal(err)
 	}
@@ -550,7 +556,7 @@ func TestAbruptDisconnects(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		s.mu.Lock()
-		conns, keys := len(s.conns), len(s.keys)
+		conns, keys := len(s.conns), len(s.sessions)
 		s.mu.Unlock()
 		if conns == 0 && keys == 0 {
 			break
@@ -698,7 +704,7 @@ func TestProcessIDsWrapAndSkipLiveOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.nextPID = 1<<31 - 1
-	s.keys[1] = 7 // a live session holds 1
+	s.sessions[1] = &liveSession{secret: 7} // a live session holds 1
 	a, _, err := s.register()
 	if err != nil {
 		t.Fatal(err)
@@ -711,7 +717,7 @@ func TestProcessIDsWrapAndSkipLiveOnes(t *testing.T) {
 		t.Fatalf("process IDs %d then %d", a, b)
 	}
 	s.unregister(a)
-	if _, ok := s.keys[a]; ok {
+	if _, ok := s.sessions[a]; ok {
 		t.Fatal("unregister kept the key")
 	}
 }

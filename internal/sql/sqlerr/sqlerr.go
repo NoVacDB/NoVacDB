@@ -61,6 +61,8 @@ const (
 	ObjectNotInPrerequisiteState = "55000"
 	QueryCanceled                = "57014"
 	AdminShutdown                = "57P01"
+	CannotConnectNow             = "57P03"
+	IdleSessionTimeout           = "57P05"
 	TooManyConnections           = "53300"
 	IOError                      = "58030"
 	ProtocolViolation            = "08P01"

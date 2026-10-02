@@ -318,7 +318,7 @@ A problem is marked ✅ only when there is a test or benchmark that proves it.
 
 | # | Problem | How NoVacDB addresses it | Status |
 |---|---|---|---|
-| 12 | One OS process per connection, heavy on memory | Lightweight goroutine per connection | 📋 |
+| 12 | One OS process per connection, heavy on memory | Lightweight goroutine per connection | ✅ |
 | 13 | Low practical `max_connections` | Thousands of connections without degradation | 📋 |
 | 14 | External pooler (PgBouncer) needed, which breaks some session features | No external pooler needed | 📋 |
 

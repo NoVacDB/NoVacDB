@@ -102,11 +102,11 @@ A full walkthrough of every component, the query lifecycle, and crash recovery i
 
 | Phase | Component | Status |
 |---|---|---|
-| 1 | Storage: pages, disk manager, buffer pool | 📋 Planned |
-| 2 | Write-ahead log and crash recovery | 📋 Planned |
-| 3 | B+Tree indexes | 📋 Planned |
-| 4 | SQL parser and executor | 📋 Planned |
-| 5 | PostgreSQL wire protocol — **MVP: `psql` can connect** | 📋 Planned |
+| 1 | Storage: pages, disk manager, buffer pool | ✅ Done |
+| 2 | Write-ahead log and crash recovery | ✅ Done |
+| 3 | B+Tree indexes | ✅ Done |
+| 4 | SQL parser and executor | ✅ Done |
+| 5 | PostgreSQL wire protocol — **MVP: `psql` can connect** | ✅ Done |
 | 6 | Transactions and MVCC with undo log — **no VACUUM** | 📋 Planned |
 | 7 | Query planner, joins, aggregates | 📋 Planned |
 | 8 | Query insights and benchmarks vs PostgreSQL | 📋 Planned |
@@ -124,7 +124,7 @@ Distributed clustering and sharding, full-text search, vector search, time-serie
 
 ## Getting started
 
-> Connecting with `psql` becomes available once Phase 5 is complete. Until then, you can build the project and run the tests.
+> The MVP is complete: `psql`, `pgbench` and standard drivers connect, and data survives crashes. There are no transactions yet (`BEGIN` is an error and every statement commits on its own), no joins or aggregates, and only six types (`integer`, `bigint`, `double precision`, `text`, `boolean`, `timestamptz`): those come in Phases 6 and 7.
 
 ### Prerequisites
 
@@ -154,7 +154,9 @@ INSERT INTO users VALUES (1, 'Asha'), (2, 'Ravi');
 SELECT * FROM users WHERE id = 1;
 ```
 
-NoVacDB runs on port **5433** by default, so it won't clash with a local PostgreSQL on 5432.
+NoVacDB runs on port **5433** by default, so it won't clash with a local PostgreSQL on 5432. It listens on `localhost` only by default, because authentication is trust: anyone who can reach the port can connect.
+
+Other options: `--listen` (address, empty for every interface), `--max-connections` (default 1000), `--idle-timeout` (end idle sessions, off by default) and `--shutdown-timeout` (on SIGINT or SIGTERM, how long running statements may take to finish before the database closes; default 30s, and a second signal stops at once).
 
 ### Use it from your app
 
