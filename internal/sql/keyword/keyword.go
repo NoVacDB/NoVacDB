@@ -1,13 +1,15 @@
-package parser
+// Package keyword holds the SQL keyword table: every keyword the lexer
+// recognises and its PostgreSQL category. See docs/design/09-sql-frontend.md.
+package keyword
 
-// KeywordCategory is PostgreSQL's classification of a keyword, which decides
+// Category is PostgreSQL's classification of a keyword, which decides
 // where it may be used as a name.
-type KeywordCategory uint8
+type Category uint8
 
 // Keyword categories, from most to least restricted.
 const (
 	// Reserved keywords are never names unless quoted.
-	Reserved KeywordCategory = iota + 1
+	Reserved Category = iota + 1
 	// TypeFuncName keywords may name functions and types, not columns or
 	// tables.
 	TypeFuncName
@@ -22,7 +24,7 @@ const (
 // that names PostgreSQL rejects are rejected here too, and the column-name
 // and unreserved keywords NoVacDB's grammar uses. Any other word is an
 // ordinary identifier, which behaves like an unreserved keyword.
-var keywords = map[string]KeywordCategory{
+var keywords = map[string]Category{
 	// Reserved.
 	"all": Reserved, "analyse": Reserved, "analyze": Reserved, "and": Reserved,
 	"any": Reserved, "array": Reserved, "as": Reserved, "asc": Reserved,
@@ -69,9 +71,8 @@ var keywords = map[string]KeywordCategory{
 	"unknown": Unreserved, "update": Unreserved, "without": Unreserved, "zone": Unreserved,
 }
 
-// LookupKeyword returns the category of a lower-case word, if it is a
-// keyword.
-func LookupKeyword(word string) (KeywordCategory, bool) {
+// Lookup returns the category of a lower-case word, if it is a keyword.
+func Lookup(word string) (Category, bool) {
 	c, ok := keywords[word]
 	return c, ok
 }

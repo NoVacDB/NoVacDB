@@ -1,6 +1,6 @@
-# 09 — SQL Front End: Lexer, Parser, Errors (`internal/sql/parser`, `internal/sql/sqlerr`)
+# 09 — SQL Front End: Lexer, Parser, Errors (`internal/sql/parser`, `internal/sql/ast`, `internal/sql/keyword`, `internal/sql/sqlerr`)
 
-Status: **Designed for Steps 4.1 (lexer) and 4.2 (parser and AST); each part is implemented in its step. Implemented so far: 4.1.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for Steps 4.1 (lexer) and 4.2 (parser and AST); each part is implemented in its step. Both are implemented.** Written and approved under the standing autonomous-mode instruction.
 
 ## 1. Problem
 
@@ -77,9 +77,9 @@ UPDATE table [[AS] alias] SET col = expr [, ...] [WHERE expr]
 DELETE FROM table [[AS] alias] [WHERE expr]
 ```
 
-`ORDER BY` items may also be an output column number or label, as in PostgreSQL. `LIMIT ALL` and `LIMIT NULL` mean no limit.
+`ORDER BY` items may also be an output column number or label, as in PostgreSQL. `LIMIT ALL` and `LIMIT NULL` mean no limit; `LIMIT` and `OFFSET` may come in either order, and `OFFSET n ROWS` is accepted. The select list may be empty (`SELECT FROM t`), as PostgreSQL allows. `CREATE INDEX` may omit the index name. `DEFAULT` takes an expression without the boolean connectives and `IS` tests, so `DEFAULT 0 NOT NULL` is a default and a constraint. Unsupported syntax that is recognisable (joins, `GROUP BY`, subqueries, `RETURNING`, `CHECK`, ...) is reported as `0A000` (feature not supported) at its position rather than as a syntax error.
 
-**Types** (names as PostgreSQL accepts them): `integer`/`int`/`int4`, `bigint`/`int8`, `double precision`/`float8`/`float`, `text`, `boolean`/`bool`, `timestamptz`/`timestamp with time zone`. `timestamp` and `timestamp without time zone` are rejected with a hint to use `timestamptz` (problem #48). Other PostgreSQL types are rejected as unsupported (`0A000`).
+**Types** (names as PostgreSQL accepts them): `integer`/`int`/`int4`, `bigint`/`int8`, `double precision`/`float8`/`float`/`float(25..53)`, `text`, `boolean`/`bool`, `timestamptz`/`timestamp with time zone`. As in PostgreSQL, a quoted type name must be a real type name (`"int4"`), not a grammar keyword (`"integer"` does not exist). `timestamp` and `timestamp without time zone` are rejected with a hint to use `timestamptz` (problem #48). Other PostgreSQL types are rejected as unsupported (`0A000`).
 
 **Expressions**, with PostgreSQL's precedence from loosest to tightest:
 
@@ -98,11 +98,13 @@ DELETE FROM table [[AS] alias] [WHERE expr]
 | 11 | unary `+` `-` | right |
 | 12 | `::` (cast) | left |
 
-Primaries: literals (integers, decimals, strings, `TRUE`, `FALSE`, `NULL`), typed literals (`timestamptz '...'`), column references (`col`, `table.col`), parameters, parenthesised expressions, `CAST(expr AS type)`, and function calls `name(args)`. The parser does not check that functions, columns or tables exist; that is the executor's job (Step 4.5), which reports the position the parser recorded.
+Primaries: literals (integers, decimals, strings, `TRUE`, `FALSE`, `NULL`), typed literals (`timestamptz '...'`), column references (`col`, `table.col`), parameters, parenthesised expressions, `CAST(expr AS type)`, `CASE`, and function calls `name(args)`. `ISNULL` and `NOTNULL` are accepted as postfix `IS [NOT] NULL`. As PostgreSQL does, unary minus applied to a numeric constant gives a negative constant, which is how `-9223372036854775808` fits in a `bigint`. The parser does not check that functions, columns or tables exist; that is the executor's job (Step 4.5), which reports the position the parser recorded.
 
-**AST.** Every node records the byte offset where it starts. Every node prints back to SQL (`String()`), fully parenthesised and with quoted identifiers where needed, so that `Parse(String(Parse(x)))` gives the same tree: the basis of the fuzz test.
+**AST** (`internal/sql/ast`). Every node records the byte offset where it starts. Every node prints back to SQL (`String()`) with quoted identifiers where needed and only the parentheses that operator precedence requires, so that `Parse(String(Parse(x)))` gives the same tree (the basis of the fuzz test), and the printed text is never nested more deeply than the original. (A first version parenthesised every operator; the fuzz test found that a long flat `1 + 1 + ...` then printed deeper than the nesting limit, which would have stopped a stored `DEFAULT` expression from loading.)
 
 **Syntax errors** are `42601` with PostgreSQL's message, `syntax error at or near "tok"` or `syntax error at end of input`, the token's position, and a hint naming what was expected where that is useful (`expected ")"`, `expected a column type`, ...). Integer literals that do not fit in 64 bits are `22003`.
+
+The keyword table lives in its own package, `internal/sql/keyword`, so that both the lexer and the AST printer (which must quote names that are keywords) use it.
 
 ### 2.4 Limits
 
@@ -144,7 +146,7 @@ No input can make the lexer or parser panic or loop: every loop consumes input, 
 - Lexer: a table of inputs and expected token streams for every rule above, including each error; positions; keyword categories; operator cutting; comments nesting; strings joined across newlines; escapes; number forms and junk.
 - `FuzzLex`: no panics; tokens are in order, do not overlap, and only whitespace and comments lie between them; re-lexing the text of each identifier, number or operator token gives the same token.
 - Parser: every statement form and option; precedence and associativity (checked through the parenthesised printing); every syntax error with its code and position; the limits.
-- `FuzzParse`: no panics; whatever parses prints to text that parses to the same printed form.
+- `FuzzParse`: no panics; whatever parses prints to text that parses to the same tree (compared structurally, ignoring positions).
 
 ## 8. Limitations
 

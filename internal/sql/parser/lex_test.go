@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/keyword"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
 )
 
@@ -137,7 +138,7 @@ func TestLexKeywordCategories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []KeywordCategory{Reserved, ColName, TypeFuncName, Unreserved, Reserved, 0}
+	want := []keyword.Category{keyword.Reserved, keyword.ColName, keyword.TypeFuncName, keyword.Unreserved, keyword.Reserved, 0}
 	for i, w := range want {
 		if toks[i].Category != w {
 			t.Errorf("token %q: category %d, want %d", toks[i].Str, toks[i].Category, w)

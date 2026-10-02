@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/keyword"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
 )
 
@@ -55,7 +56,7 @@ type Token struct {
 	// the operator.
 	Str string
 	// Category is set for keywords.
-	Category KeywordCategory
+	Category keyword.Category
 	// Quoted is set for quoted identifiers.
 	Quoted bool
 	// Param is the parameter number of a Param token.
@@ -249,7 +250,7 @@ func (l *lexer) lexIdent(start int) (Token, error) {
 		return Token{}, l.errAt(start, sqlerr.NameTooLong, "identifier %q is %d bytes long, more than the limit of %d", name, len(name), MaxIdentifierLength).
 			WithHint("Use a shorter name. NoVacDB does not truncate long names, so two of them cannot silently become the same name.")
 	}
-	if cat, ok := keywords[name]; ok {
+	if cat, ok := keyword.Lookup(name); ok {
 		return Token{Kind: Keyword, Pos: start, End: l.i, Str: name, Category: cat}, nil
 	}
 	return Token{Kind: Ident, Pos: start, End: l.i, Str: name}, nil
