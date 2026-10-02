@@ -74,7 +74,7 @@ func (st *stmt) selectStmt(s *ast.Select) (*Result, error) {
 				return nil, sqlerr.New(sqlerr.SyntaxError, "SELECT * with no tables specified is not valid").At(st.sql, t.P)
 			}
 			if t.StarTable != "" && t.StarTable != b.name {
-				return nil, sqlerr.New(sqlerr.UndefinedTable, "missing FROM-clause entry for table %q", t.StarTable).At(st.sql, t.P)
+				return nil, b.badQualifier(t.StarTable).At(st.sql, t.P)
 			}
 			for i, c := range tbl.Columns {
 				outs = append(outs, &colNode{idx: i, t: c.Type})

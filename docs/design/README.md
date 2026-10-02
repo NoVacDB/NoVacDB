@@ -18,4 +18,5 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [07](07-checkpoints-recovery.md) | Logging heap changes, checkpoints, crash recovery (`internal/storage`, `internal/wal`) | Implemented |
 | [08](08-btree.md) | B+Tree indexes (`internal/btree`, `internal/wal`) | Implemented |
 | [09](09-sql-frontend.md) | SQL lexer, parser, AST and errors (`internal/sql/...`) | Implemented |
-| [10](10-executor.md) | SQL types, rows, catalog, atomic statements, executor (`internal/sql/types`, `internal/catalog`, `internal/sql/executor`) | In progress (4.3 implemented) |
+| [10](10-executor.md) | SQL types, rows, catalog, atomic statements, executor (`internal/sql/types`, `internal/catalog`, `internal/sql/executor`) | Implemented |
+| [11](11-sql-logic-tests.md) | SQL logic tests and the SQL crash workload (`tests/sqllogic`, `tests/crash`) | Implemented |

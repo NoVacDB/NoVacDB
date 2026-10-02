@@ -1,0 +1,233 @@
+# Queries that use indexes give the same answers as without them, across
+# NULLs, special values, mixed numeric types, updates, restarts and crashes.
+
+statement ok
+CREATE TABLE m (id int PRIMARY KEY, a int, b bigint, f double precision, s text, t timestamptz)
+
+statement ok
+CREATE INDEX m_ab ON m (a, b)
+
+statement ok
+CREATE INDEX m_f ON m (f)
+
+statement ok
+CREATE INDEX m_s ON m (s)
+
+statement ok
+CREATE INDEX m_t ON m (t)
+
+statement ok
+INSERT INTO m VALUES
+	(1, 1, 10, 0.5, 'apple', '2024-01-01'),
+	(2, 1, 20, -0.0, 'banana', '2024-01-02'),
+	(3, 1, NULL, 0.0, NULL, 'infinity'),
+	(4, 2, 10, 'NaN', 'cherry', '-infinity'),
+	(5, 2, 30, 'Infinity', 'apple', NULL),
+	(6, NULL, 10, '-Infinity', '', '2023-12-31 23:59:59.999999+00'),
+	(7, 3, 9223372036854775807, 1e300, 'Apple', '2024-01-01'),
+	(8, 3, -9223372036854775808, NULL, 'apples', '2000-01-01')
+
+query I rowsort
+SELECT id FROM m WHERE a = 1
+----
+1
+2
+3
+
+query I rowsort
+SELECT id FROM m WHERE a = 1 AND b = 10
+----
+1
+
+query I rowsort
+SELECT id FROM m WHERE a = 1 AND b > 10
+----
+2
+
+query I rowsort
+SELECT id FROM m WHERE a = 1 AND b >= 10 AND b < 20
+----
+1
+
+query I rowsort
+SELECT id FROM m WHERE 2 = a AND 30 <= b
+----
+5
+
+query I rowsort
+SELECT id FROM m WHERE a > 1
+----
+4
+5
+7
+8
+
+query I rowsort
+SELECT id FROM m WHERE a < 3 AND a >= 2
+----
+4
+5
+
+query I rowsort
+SELECT id FROM m WHERE a BETWEEN 2 AND 3 AND b < 0
+----
+8
+
+# Mixed numeric types: an integer column against decimals and bigints.
+query I rowsort
+SELECT id FROM m WHERE a = 1.0
+----
+1
+2
+3
+
+query I rowsort
+SELECT id FROM m WHERE a < 1.5
+----
+1
+2
+3
+
+query I rowsort
+SELECT id FROM m WHERE b = 9223372036854775807
+----
+7
+
+query I rowsort
+SELECT id FROM m WHERE b > 9223372036854775806
+----
+7
+
+# Doubles: -0 = 0, NaN equals itself and is above everything.
+query I rowsort
+SELECT id FROM m WHERE f = 0
+----
+2
+3
+
+query I rowsort
+SELECT id FROM m WHERE f = 'NaN'
+----
+4
+
+query I rowsort
+SELECT id FROM m WHERE f > 1e299
+----
+4
+5
+7
+
+query I rowsort
+SELECT id FROM m WHERE f < 0
+----
+6
+
+query I rowsort
+SELECT id FROM m WHERE f >= '-Infinity' AND f <= 0
+----
+2
+3
+6
+
+# Text: bytes order, empty strings, prefixes.
+query I rowsort
+SELECT id FROM m WHERE s = 'apple'
+----
+1
+5
+
+query I rowsort
+SELECT id FROM m WHERE s > 'apple' AND s < 'b'
+----
+8
+
+query I rowsort
+SELECT id FROM m WHERE s < 'a'
+----
+6
+7
+
+query I rowsort
+SELECT id FROM m WHERE s = ''
+----
+6
+
+# Timestamps, including infinities.
+query I rowsort
+SELECT id FROM m WHERE t = '2024-01-01'
+----
+1
+7
+
+query I rowsort
+SELECT id FROM m WHERE t > '2024-01-01'
+----
+2
+3
+
+query I rowsort
+SELECT id FROM m WHERE t < '2024-01-01 00:00:00+00'
+----
+4
+6
+8
+
+# Comparisons with NULL match nothing.
+query I
+SELECT id FROM m WHERE a = NULL
+----
+
+query I
+SELECT id FROM m WHERE f > NULL AND a = 1
+----
+
+# Changes keep every index right.
+statement ok UPDATE 3
+UPDATE m SET a = a + 10, s = upper(s) WHERE a = 1
+
+query I rowsort
+SELECT id FROM m WHERE a = 11
+----
+1
+2
+3
+
+query I
+SELECT id FROM m WHERE a = 1
+----
+
+query I rowsort
+SELECT id FROM m WHERE s = 'APPLE'
+----
+1
+
+statement ok DELETE 2
+DELETE FROM m WHERE f = 0
+
+restart
+
+query I rowsort
+SELECT id FROM m WHERE a >= 11
+----
+1
+
+crash
+
+query IIITD rowsort
+SELECT id, a, b, s, t FROM m WHERE b = 10
+----
+1|11|10|APPLE|2024-01-01 00:00:00+00
+4|2|10|cherry|-infinity
+6|NULL|10|(empty)|2023-12-31 23:59:59.999999+00
+
+statement ok
+DROP INDEX m_ab
+
+query I rowsort
+SELECT id FROM m WHERE a = 2
+----
+4
+5
+
+statement error 23505 duplicate key value violates unique constraint "m_pkey"
+INSERT INTO m (id) VALUES (8)

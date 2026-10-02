@@ -32,7 +32,8 @@ func TestExpressions(t *testing.T) {
 		{"'n=' || 42", "n=42"},
 		{"1.5 || 'x'", "1.5x"},
 		{"'x' || NULL", "NULL"},
-		{"'t' || true", "tt"},
+		{"'t' || true", "ttrue"},
+		{"true::text", "true"},
 		// comparison and logic
 		{"1 < 2", "t"},
 		{"2 <= 2", "t"},

@@ -490,7 +490,7 @@ func TestCasts(t *testing.T) {
 		{NewFloat8(-9.223372036854775808e18), Int8, "-9223372036854775808", ""},
 		{NewFloat8(math.NaN()), Int4, "", sqlerr.NumericValueOutOfRange}, {NewFloat8(math.Inf(-1)), Int8, "", sqlerr.NumericValueOutOfRange},
 		{NewInt4(0), Bool, "f", ""}, {NewInt4(-3), Bool, "t", ""}, {NewBool(true), Int4, "1", ""},
-		{NewInt4(42), Text, "42", ""}, {NewBool(false), Text, "f", ""}, {NewFloat8(0.1), Text, "0.1", ""},
+		{NewInt4(42), Text, "42", ""}, {NewBool(false), Text, "false", ""}, {NewBool(true), Text, "true", ""}, {NewFloat8(0.1), Text, "0.1", ""},
 		{NewTimestampTZ(0), Text, "2000-01-01 00:00:00+00", ""},
 		{NewText(" 12 "), Int4, "12", ""}, {NewText("x"), Int4, "", sqlerr.InvalidTextRepresentation},
 		{NewUnknown("t"), Bool, "t", ""}, {NewUnknown("2024-05-06"), TimestampTZ, "2024-05-06 00:00:00+00", ""},

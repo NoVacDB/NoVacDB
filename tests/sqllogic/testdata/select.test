@@ -1,0 +1,227 @@
+# SELECT: WHERE, ORDER BY, DISTINCT, LIMIT, OFFSET, aliases and output
+# columns.
+
+statement ok
+CREATE TABLE p (id int PRIMARY KEY, name text, team text, pts integer, rate double precision)
+
+statement ok
+INSERT INTO p VALUES (1, 'ann', 'red', 10, 1.5), (2, 'bob', 'blue', 7, NULL), (3, 'cy', 'red', NULL, 0.0),
+	(4, 'dee', NULL, 7, -0.0), (5, 'eve', 'blue', 12, 'NaN'), (6, 'fay', 'red', 7, 2.25)
+
+query T rowsort
+SELECT name FROM p WHERE team = 'red'
+----
+ann
+cy
+fay
+
+query T
+SELECT name FROM p WHERE pts > 7 OR team IS NULL ORDER BY name
+----
+ann
+dee
+eve
+
+# NULL never matches a comparison.
+query T rowsort
+SELECT name FROM p WHERE pts <> 7
+----
+ann
+eve
+
+query T
+SELECT name FROM p WHERE pts IS NULL
+----
+cy
+
+# ORDER BY: NULLs last ascending, first descending, unless told otherwise.
+query TI
+SELECT name, pts FROM p ORDER BY pts, name
+----
+bob|7
+dee|7
+fay|7
+ann|10
+eve|12
+cy|NULL
+
+query TI
+SELECT name, pts FROM p ORDER BY pts DESC, name
+----
+cy|NULL
+eve|12
+ann|10
+bob|7
+dee|7
+fay|7
+
+query TI
+SELECT name, pts FROM p ORDER BY pts DESC NULLS LAST, name DESC
+----
+eve|12
+ann|10
+fay|7
+dee|7
+bob|7
+cy|NULL
+
+query TI
+SELECT name, pts FROM p ORDER BY pts NULLS FIRST, id LIMIT 2
+----
+cy|NULL
+bob|7
+
+# By output position, output name, and by expressions not in the list.
+query TT
+SELECT team, name FROM p ORDER BY 1 DESC, 2
+----
+NULL|dee
+red|ann
+red|cy
+red|fay
+blue|bob
+blue|eve
+
+query IT
+SELECT pts * 2 AS double_pts, name FROM p WHERE pts IS NOT NULL ORDER BY double_pts DESC, name LIMIT 3
+----
+24|eve
+20|ann
+14|bob
+
+query T
+SELECT name FROM p ORDER BY length(name) DESC, name DESC LIMIT 2
+----
+fay
+eve
+
+# Doubles order with -0 = 0 and NaN above every number.
+query TR
+SELECT name, rate FROM p WHERE rate IS NOT NULL ORDER BY rate, id
+----
+cy|0
+dee|-0
+ann|1.5
+fay|2.25
+eve|NaN
+
+# DISTINCT treats NULLs as equal.
+query T
+SELECT DISTINCT team FROM p ORDER BY team
+----
+blue
+red
+NULL
+
+query TI rowsort
+SELECT DISTINCT team, pts FROM p WHERE pts = 7
+----
+blue|7
+NULL|7
+red|7
+
+query I
+SELECT DISTINCT pts FROM p ORDER BY 1 DESC NULLS LAST
+----
+12
+10
+7
+NULL
+
+statement error 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+SELECT DISTINCT team FROM p ORDER BY name
+
+# LIMIT and OFFSET.
+query I
+SELECT id FROM p ORDER BY id LIMIT 2 OFFSET 3
+----
+4
+5
+
+query I
+SELECT id FROM p ORDER BY id OFFSET 5
+----
+6
+
+query I
+SELECT id FROM p ORDER BY id LIMIT 0
+----
+
+query I
+SELECT id FROM p ORDER BY id DESC LIMIT NULL OFFSET NULL
+----
+6
+5
+4
+3
+2
+1
+
+query I
+SELECT id FROM p ORDER BY id LIMIT 1 + 1
+----
+1
+2
+
+statement error 2201W LIMIT must not be negative
+SELECT id FROM p LIMIT -1
+
+statement error 2201X OFFSET must not be negative
+SELECT id FROM p OFFSET -1
+
+statement error 42P10 argument of LIMIT must not contain variables
+SELECT id FROM p LIMIT id
+
+statement error 42P10 ORDER BY position 3 is not in select list
+SELECT id, name FROM p ORDER BY 3
+
+# Stars, qualified names and aliases.
+query ITT
+SELECT x.id, x.name, team FROM p AS x WHERE x.id = 2
+----
+2|bob|blue
+
+statement error 42P01 invalid reference to FROM-clause entry for table "p"
+SELECT p.id FROM p AS x
+
+statement error 42P01 missing FROM-clause entry for table "q"
+SELECT q.id FROM p
+
+query ITTIR
+SELECT * FROM p WHERE id = 1
+----
+1|ann|red|10|1.5
+
+query ITTIRI
+SELECT x.*, 0 FROM p x WHERE id = 1
+----
+1|ann|red|10|1.5|0
+
+statement error 42601 SELECT * with no tables specified is not valid
+SELECT *
+
+statement error 42703 column "nope" does not exist
+SELECT nope FROM p
+
+statement error 42703 column "name" does not exist
+SELECT name
+
+statement error 42P01 relation "nope" does not exist
+SELECT * FROM nope
+
+statement error 42804 argument of WHERE must be type boolean, not type integer
+SELECT * FROM p WHERE pts
+
+# Without FROM: one row, filtered by WHERE.
+query IT
+SELECT 1 + 1, 'two'
+----
+2|two
+
+query I
+SELECT 1 WHERE false
+----
+
+query I
+SELECT 1 WHERE NULL
+----

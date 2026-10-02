@@ -38,6 +38,13 @@ func Cast(v Value, to Type) (Value, error) {
 		return v, nil
 	case from == Unknown || from == Text:
 		return Parse(v.S, to)
+	case to == Text && from == Bool:
+		// PostgreSQL's boolean-to-text cast spells the word out, unlike
+		// the output form (t, f).
+		if v.Bool() {
+			return NewText("true"), nil
+		}
+		return NewText("false"), nil
 	case to == Text:
 		return NewText(Format(v)), nil
 	case from.IsInteger() && to.IsInteger():

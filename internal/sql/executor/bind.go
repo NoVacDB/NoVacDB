@@ -247,7 +247,7 @@ func (b *binder) column(e *ast.ColumnRef) (node, error) {
 		return nil, b.at(b.noVars(), e.P)
 	}
 	if e.Table != "" && (b.table == nil || e.Table != b.name) {
-		return nil, b.at(sqlerr.New(sqlerr.UndefinedTable, "missing FROM-clause entry for table %q", e.Table), e.P)
+		return nil, b.at(b.badQualifier(e.Table), e.P)
 	}
 	if b.table != nil {
 		if i := b.table.ColumnIndex(e.Column); i >= 0 {
@@ -260,6 +260,17 @@ func (b *binder) column(e *ast.ColumnRef) (node, error) {
 		return nil, b.at(sqlerr.New(sqlerr.UndefinedColumn, "column %s does not exist", name), e.P)
 	}
 	return nil, b.at(sqlerr.New(sqlerr.UndefinedColumn, "column %q does not exist", e.Column), e.P)
+}
+
+// badQualifier is the error for a column qualified by a name that is not
+// the table's name in this query: PostgreSQL points out an alias that
+// hides the table's own name.
+func (b *binder) badQualifier(name string) *sqlerr.Error {
+	if b.table != nil && name == b.table.Name {
+		return sqlerr.New(sqlerr.UndefinedTable, "invalid reference to FROM-clause entry for table %q", name).
+			WithHint("Perhaps you meant to reference the table alias %q.", b.name)
+	}
+	return sqlerr.New(sqlerr.UndefinedTable, "missing FROM-clause entry for table %q", name)
 }
 
 func (b *binder) unary(e *ast.Unary) (node, error) {

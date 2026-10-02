@@ -46,7 +46,7 @@ stress:
 	NOVACDB_BTREE_OPS=$(BTREE_OPS) go test -count=1 -timeout 120m -run 'Model' ./internal/btree/
 
 sqltest:
-	@echo "sqltest: SQL logic test runner not built yet (arrives in Step 4.6)"
+	go test -count=1 -v ./tests/sqllogic/
 
 bench:
 	go test -run='^$$' -bench=. -benchmem ./...

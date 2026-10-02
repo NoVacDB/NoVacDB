@@ -38,7 +38,7 @@ A `types.Value` is a type, a null flag and the payload. Every operation is a pur
 
 **Arithmetic.** `+ - * / %` on integers (operands already converted to one type by the executor) check overflow (`22003`, "integer out of range" / "bigint out of range"); division and modulo by zero are `22012`; integer division truncates toward zero. On `double precision`, a finite computation that overflows to infinity is `22003` ("value out of range: overflow") and one that underflows to zero is "value out of range: underflow"; division by zero is `22012`. `^` is computed in `double precision`. Unary minus checks overflow. `||` concatenates text, converting a non-text operand to its text form, as PostgreSQL does. `LIKE`/`ILIKE` match `%` and `_` with backslash escapes (a trailing backslash is `22025`); `ILIKE`, `lower` and `upper` change only ASCII letters, as the C collation does.
 
-**Casts.** (`types.Cast`; `types.CanCast` tells the executor which exist.) `int4 ↔ int8` (range-checked), integers → `double precision`, `double precision` → integers (rounded half to even, range-checked, NaN and infinities rejected), `int4 ↔ boolean`, anything → `text` (the output form), `text` → anything (the input form). `timestamptz` converts only to and from text.
+**Casts.** (`types.Cast`; `types.CanCast` tells the executor which exist.) `int4 ↔ int8` (range-checked), integers → `double precision`, `double precision` → integers (rounded half to even, range-checked, NaN and infinities rejected), `int4 ↔ boolean`, anything → `text` (the output form, except that `boolean` becomes `true` or `false`, as PostgreSQL's cast spells it, while its output form is `t` or `f`), `text` → anything (the input form). `timestamptz` converts only to and from text.
 
 **Input forms** follow PostgreSQL:
 
@@ -189,6 +189,7 @@ Assignments convert values as PostgreSQL's assignment casts do: between numeric 
 - **INSERT without a column list** may give fewer values than the table has columns; the rest take their defaults, as in PostgreSQL.
 - **Writes that match no rows** (`UPDATE ... WHERE false`) write nothing to the log. A DDL statement that fails the catalog's checks never restarts the database: the catalog reports it after the statement group has begun but before any change (its rule, 2.5), so the empty group commits.
 - **A failed checkpoint after a commit** is logged and retried after the next write: the statement has committed and succeeds.
+- **Found by the SQL logic tests (Step 4.6).** Writing the expected results from PostgreSQL's behaviour exposed two differences, both fixed: `true::text` is `true`, not the output form `t` (so `'is ' || true` is `is true`), and a column qualified by a table's own name after the table was aliased (`SELECT p.id FROM p AS x`) is PostgreSQL's "invalid reference to FROM-clause entry for table "p"", with a hint naming the alias.
 - **`Open`** returns Go errors (wrapping a `*sqlerr.Error` for a damaged catalog); `Exec` always returns `*sqlerr.Error`. Errors from storage map to `XX001` for corruption, `54000` for a statement larger than the buffer pool, and `58030` otherwise.
 
 ## 3. Formats
