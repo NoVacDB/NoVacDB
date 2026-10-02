@@ -2,7 +2,7 @@
 
 Packages: `internal/sql/types` (Step 4.3), `internal/catalog` and `internal/wal` (Step 4.4), `internal/sql/executor` (Step 4.5).
 
-Status: **Designed for Steps 4.3–4.5; each part is implemented in its step. Implemented so far: 4.3, 4.4.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for Steps 4.3–4.5; each part is implemented in its step. Implemented: 4.3, 4.4, 4.5.** Written and approved under the standing autonomous-mode instruction.
 
 The three steps share one document because they constrain each other: the row format serves the catalog, the catalog's changes must be atomic like any statement's, and the executor's write path is built around that atomicity.
 
@@ -167,7 +167,7 @@ It is written once, when the database is created: the three heaps are created in
 Limit/Offset ← Distinct ← Project ← Sort ← Filter ← (SeqScan | IndexScan)
 ```
 
-- **Index scan.** The planner looks at the `WHERE` clause's top-level `AND` terms of the form `column op constant` (`=`, `<`, `<=`, `>`, `>=`, `BETWEEN`) where the constant has exactly the column's type, or is an integer that fits it. It picks the index with the longest prefix of equality terms, plus a range on the next column. The index scan reads the key range and fetches each row; the whole `WHERE` is still applied afterwards, so the index only narrows the rows read and never decides correctness.
+- **Index scan.** The planner looks at the `WHERE` clause's top-level `AND` terms of the form `column op constant` or `constant op column` (`=`, `<`, `<=`, `>`, `>=`, and `BETWEEN`, which binds to two such terms) where the comparison is done in the column's own type (so the column is not widened) and the constant side is a literal, or casts of one, that evaluates without error to a non-NULL value. That value is exactly what the comparison compares with, so its key encoding is the encoding of equal column values. It picks the index with the longest prefix of equality terms, plus a range on the next column. The index scan reads the key range and fetches each row; the whole `WHERE` is still applied afterwards, so the index only narrows the rows read and never decides correctness.
 - **Sort** sorts in memory, stably. `ORDER BY` accepts expressions, output column numbers and output column names. NULLs sort last ascending and first descending unless `NULLS FIRST/LAST` says otherwise. With `DISTINCT`, `ORDER BY` expressions must be in the select list (`42P10`).
 - `LIMIT` and `OFFSET` take constant expressions; negative values are `2201W`/`2201X`.
 
@@ -179,6 +179,17 @@ Limit/Offset ← Distinct ← Project ← Sort ← Filter ← (SeqScan | IndexSc
 Assignments convert values as PostgreSQL's assignment casts do: between numeric types (range-checked), from untyped literals by parsing, and from anything to `text`. Other mismatches are `42804` "column "a" is of type integer but expression is of type text".
 
 **Checkpoints.** After a write statement commits, the executor takes a checkpoint if the log has grown by more than `CheckpointBytes` (64 MiB by default) since the last one. `Close` ends with a checkpoint.
+
+### 2.6.1 Implementation notes (Step 4.5)
+
+- **Short-circuit evaluation.** `AND` stops at a FALSE left operand, `OR` at a TRUE one, `CASE` evaluates only the branch it takes and `coalesce` stops at the first non-NULL argument, as PostgreSQL's executor does, so `x <> 0 AND 10 / x > 1` never divides by zero.
+- **Errors that depend on rows depend on the plan.** An index scan reads a subset of the rows, in key order, so a run-time data error (class 22 or 23) that a sequential scan meets in some row may not happen, or another row's error may come first. PostgreSQL behaves the same way. The randomized tests accept exactly this and nothing else.
+- **Constants are not folded.** PostgreSQL folds constant subexpressions when planning, so `WHERE a = 5000000000::integer` fails even on an empty table; NoVacDB evaluates them per row and fails only if a row is read.
+- **Error positions** point at the start of the offending expression or name. PostgreSQL points at the operator for operator errors; the syntax tree does not keep operator positions.
+- **INSERT without a column list** may give fewer values than the table has columns; the rest take their defaults, as in PostgreSQL.
+- **Writes that match no rows** (`UPDATE ... WHERE false`) write nothing to the log. A DDL statement that fails the catalog's checks never restarts the database: the catalog reports it after the statement group has begun but before any change (its rule, 2.5), so the empty group commits.
+- **A failed checkpoint after a commit** is logged and retried after the next write: the statement has committed and succeeds.
+- **`Open`** returns Go errors (wrapping a `*sqlerr.Error` for a damaged catalog); `Exec` always returns `*sqlerr.Error`. Errors from storage map to `XX001` for corruption, `54000` for a statement larger than the buffer pool, and `58030` otherwise.
 
 ## 3. Formats
 
@@ -220,7 +231,7 @@ The database lock (2.6) serialises writers and excludes readers during writes. U
 - **Types (4.3):** a table of inputs and outputs for every type, including bounds, special values and every error; arithmetic and comparison against Go reference computations, for random values; casts in both directions; three-valued logic truth tables; round trips value → text → value and value → tuple → value; key encoding order equal to `Compare` order for random values; `FuzzDecodeRow` and `FuzzParseValue` (no panics, round trips).
 - **Catalog (4.4):** create and drop tables and indexes, reload after reopen and after a crash; name rules; system-table protection; bootstrap interrupted at every point; corrupt catalog file and rows; IDs unique across reloads; loading independent of system-row order; failed DDL changes nothing (memory and disk) and returns `*sqlerr.Error`; an injected write or sync failure at every point of a multi-DDL statement leaves the catalog exactly before or (only if the commit itself failed) exactly after; a randomized workload of DDL and rows with crashes inside statements, checkpoints that free dropped pages, and reopenings, checked against a model, table by table and index entry by index entry.
 - **Statements (4.4):** a group's pages never reach disk before commit, even with a tiny pool; crash at every point of a multi-page statement leaves it all or nothing; `Abandon` and reopen discard it; checkpoints wait for statements; crafted logs of begin, commit and checkpoint records give exactly the expected discarded groups and records; mismatched or orphan commits are `ErrCorrupt`.
-- **Executor (4.5):** every statement form, error code and position; type resolution; index scans return exactly what sequential scans return, for random data and predicates; uniqueness and NOT NULL in every path; concurrent readers with a writer under `-race`; a self-restart after an injected I/O failure.
+- **Executor (4.5):** every statement form, error code and position; type resolution; index scans return exactly what sequential scans return, for random data and predicates, and read exactly the matching rows when an index can answer the clause; uniqueness and NOT NULL in every path, including keys swapped within a statement; concurrent readers with writers under `-race`, which must always see whole statements; a self-restart after an injected write or sync failure at every point of a statement, with the database afterwards (and after a crash) holding the statement entirely or not at all; oversized statements; a failed restart; cancellation; a randomized generator of typed and mistyped statements run against index and sequential plans, which must agree and never produce an internal, corruption or I/O error; `FuzzExec`.
 - **SQL logic tests (4.6)** cover the statements end to end, and the crash harness gains an SQL workload whose statements must each be all or nothing after any crash.
 
 ## 8. Limitations (Phase 4)

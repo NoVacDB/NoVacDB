@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 4.5 — Executor** (design in `10-executor.md`)
+👉 **Step 4.6 — SQL logic tests**
 
 ---
 
@@ -36,6 +36,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-02 | 4.2 Parser and AST | ✅ Done | Recursive-descent parser for CREATE/DROP TABLE, CREATE/DROP INDEX, INSERT, SELECT (WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT), UPDATE, DELETE; PostgreSQL precedence, keyword categories, typed literals, CASE, casts, parameters; `0A000` with position for recognised but unsupported syntax. `internal/sql/ast` prints every tree back to SQL; FuzzParse checks parse → print → parse. 36 deliberate-bug checks (2 equivalent, removed as redundant code). |
 | 2026-10-02 | 4.3 Types and values | ✅ Done | Design doc `10-executor.md` (types, rows, catalog, atomic statements, executor). `internal/sql/types`: integer, bigint, double precision, text, boolean, timestamptz with PostgreSQL's input/output forms, three-valued logic, overflow-checked arithmetic, casts, LIKE; row (tuple) encoding and order-preserving index keys. Arithmetic checked against math/big on 200k random operand pairs; key order equals Compare order. Found and fixed a double-rounding bug in fractional seconds. 2 fuzz targets; 46 deliberate-bug checks (2 equivalent). |
 | 2026-10-02 | 4.4 Catalog | ✅ Done | Atomic statements: WAL statement-begin/commit records (types 4, 5), "no steal" through the existing WAL-rule hook, two-pass recovery that discards unfinished groups, `Engine.Abandon`. `internal/catalog`: tables, columns and indexes in three system heaps plus a once-written catalog file; PostgreSQL index naming; DDL whose `*sqlerr.Error` failures change nothing. Randomized DDL-and-crash test against a model (1000 seeded runs) and statement crash test (1500 runs); injected I/O failure at every point of a DDL statement; 87 deliberate-bug checks (1 equivalent piece of code removed). Fixed a Phase 3 B+Tree concurrency test that failed without `-race`. |
+| 2026-10-02 | 4.5 Executor | ✅ Done | `internal/sql/executor`: `Open`/`Exec`/`Close`, binding with PostgreSQL's type resolution and error codes, functions, sequential and index scans (planner picks the longest equality prefix plus a range), sort, DISTINCT, LIMIT/OFFSET, two-phase INSERT/UPDATE/DELETE with NOT NULL and end-of-statement uniqueness, DDL, self-restart after failures, checkpoints by WAL growth. Index plans checked against sequential plans on random data (3000 queries × 31 seeds) and by a randomized statement generator (600k statements, 150 seeds); I/O fault at every point of six statement kinds; fuzz target; 73 deliberate-bug checks (4 equivalent); coverage 96%. |
 
 ---
 
@@ -148,10 +149,10 @@ Tokens for keywords, identifiers (PostgreSQL case rules), string and numeric lit
 ### ✅ Step 4.4 — Catalog
 Tables, columns, and indexes stored in system tables on disk, loaded at startup.
 
-### 👉 Step 4.5 — Executor
+### ✅ Step 4.5 — Executor
 Iterator (Volcano) model: sequential scan, index scan, filter, projection, sort, limit, insert, update, delete. Design doc `10-executor.md`.
 
-### ⬜ Step 4.6 — SQL logic tests
+### 👉 Step 4.6 — SQL logic tests
 In-house sqllogictest runner (no dependencies), initial test files covering every supported statement, `make sqltest` wired up.
 
 ---

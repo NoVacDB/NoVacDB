@@ -36,6 +36,8 @@ const (
 	UndefinedTable               = "42P01"
 	UndefinedObject              = "42704"
 	UndefinedFunction            = "42883"
+	AmbiguousFunction            = "42725"
+	WrongObjectType              = "42809"
 	UndefinedParameter           = "42P02"
 	DuplicateTable               = "42P07"
 	DuplicateObject              = "42710"
