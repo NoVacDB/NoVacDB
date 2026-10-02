@@ -2,11 +2,13 @@ package wal
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"path"
 	"sync"
+	"sync/atomic"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/btree"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
@@ -35,7 +37,14 @@ type RecoveryStats struct {
 	RedoLSN  LSN // where replay started
 	EndLSN   LSN // where the log ended
 	Replayed int // heap and B+Tree records replayed
+	// Statements that began but never committed, and their records,
+	// which recovery left out.
+	DiscardedStatements int
+	Discarded           int
 }
+
+// ErrStatement means a statement-group call was made out of order.
+var ErrStatement = errors.New("wal: statement begin and commit out of order")
 
 // Engine is a database directory with crash recovery: a data file, its log,
 // a buffer pool that obeys the WAL rule, and checkpoints. See
@@ -54,6 +63,14 @@ type Engine struct {
 
 	mu     sync.Mutex
 	closed bool
+
+	// stmtMu is held from BeginStatement to CommitStatement, so there is
+	// one statement group at a time and checkpoints wait for it.
+	stmtMu    sync.Mutex
+	stmtBegin LSN
+	// horizon is the open statement's begin LSN, 0 if none: pages with a
+	// higher LSN were changed by it and must not reach disk yet.
+	horizon atomic.Uint64
 }
 
 // OpenEngine opens the database in dir, creating it if it does not exist,
@@ -108,7 +125,17 @@ func (e *Engine) open(ctx context.Context, opts EngineOptions) error {
 		return err
 	}
 	flushed, force := RuleHooks(e.w)
-	if e.bp, err = storage.NewBufferPool(e.dm, storage.Options{Frames: opts.Frames, FlushedLSN: flushed, FlushWAL: force}); err != nil {
+	// No page changed by an unfinished statement may reach disk: while a
+	// statement is open, the log counts as durable only up to its begin
+	// record (docs/design/10-executor.md section 2.4).
+	clamped := func() uint64 {
+		f := flushed()
+		if h := e.horizon.Load(); h != 0 && h < f {
+			return h
+		}
+		return f
+	}
+	if e.bp, err = storage.NewBufferPool(e.dm, storage.Options{Frames: opts.Frames, FlushedLSN: clamped, FlushWAL: force}); err != nil {
 		return err
 	}
 	if err := e.replay(ctx, walDir, redo); err != nil {
@@ -124,8 +151,62 @@ func (e *Engine) open(ctx context.Context, opts EngineOptions) error {
 	return nil
 }
 
-// replay redoes every record from redo to the end of the log.
+// span is a range of LSNs [from, to).
+type span struct{ from, to LSN }
+
+// uncommitted finds the statement groups in the log from redo that began
+// and never committed: a begin record followed by another begin, a
+// checkpoint record or the end of the log. Their records must not be
+// replayed.
+func (e *Engine) uncommitted(walDir string, redo LSN) ([]span, error) {
+	r, err := NewReader(e.fsys, walDir, redo)
+	if err != nil {
+		return nil, err
+	}
+	var out []span
+	var open LSN // begin LSN of the open group, 0 if none
+	for {
+		rec, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("finding statements: %w", err)
+		}
+		switch rec.Type {
+		case RecordStmtBegin:
+			if open != 0 {
+				out = append(out, span{open, rec.LSN})
+			}
+			open = rec.LSN
+		case RecordStmtCommit:
+			if len(rec.Payload) != 8 || open == 0 || LSN(binary.LittleEndian.Uint64(rec.Payload)) != open {
+				return nil, fmt.Errorf("statement commit at %d does not match an open statement: %w", rec.LSN, ErrCorrupt)
+			}
+			open = 0
+		case RecordCheckpoint:
+			// A checkpoint never runs inside a statement: one that follows
+			// an open group means the group was abandoned.
+			if open != 0 {
+				out = append(out, span{open, rec.LSN})
+				open = 0
+			}
+		}
+	}
+	if open != 0 {
+		out = append(out, span{open, r.End()})
+	}
+	return out, nil
+}
+
+// replay redoes every record from redo to the end of the log, except those
+// of statements that never committed.
 func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
+	skip, err := e.uncommitted(walDir, redo)
+	if err != nil {
+		return err
+	}
+	e.rec.DiscardedStatements = len(skip)
 	r, err := NewReader(e.fsys, walDir, redo)
 	if err != nil {
 		return err
@@ -139,6 +220,13 @@ func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
 		if err != nil {
 			return fmt.Errorf("replay: %w", err)
 		}
+		for len(skip) > 0 && rec.LSN >= skip[0].to {
+			skip = skip[1:]
+		}
+		if len(skip) > 0 && rec.LSN >= skip[0].from {
+			e.rec.Discarded++
+			continue
+		}
 		switch rec.Type {
 		case RecordHeap:
 			if err := storage.RedoHeapRecord(ctx, e.bp, uint64(rec.LSN), rec.Payload); err != nil {
@@ -150,8 +238,8 @@ func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
 				return fmt.Errorf("replay: %w: %w", ErrCorrupt, err)
 			}
 			e.rec.Replayed++
-		case RecordCheckpoint:
-			// Nothing to redo; recovery already chose its start point.
+		case RecordCheckpoint, RecordStmtBegin, RecordStmtCommit:
+			// Nothing to redo.
 		default:
 			return fmt.Errorf("replay: record %d has unknown type %d: %w", rec.LSN, rec.Type, ErrCorrupt)
 		}
@@ -163,6 +251,61 @@ func (e *Engine) replay(ctx context.Context, walDir string, redo LSN) error {
 	}
 	e.rec.EndLSN = r.End()
 	return nil
+}
+
+// BeginStatement starts a statement group: every change until
+// CommitStatement is one atomic unit across a crash, and none of the pages
+// it changes can reach disk before the commit. It waits for any other
+// statement or checkpoint. If anything fails after BeginStatement, the
+// caller must Abandon the engine: there is no undo.
+func (e *Engine) BeginStatement(ctx context.Context) error {
+	if err := e.check(); err != nil {
+		return err
+	}
+	e.stmtMu.Lock()
+	lsn, err := e.w.Append(ctx, RecordStmtBegin, nil)
+	if err != nil {
+		e.stmtMu.Unlock()
+		return fmt.Errorf("beginning a statement: %w", err)
+	}
+	e.stmtBegin = lsn
+	e.horizon.Store(uint64(lsn))
+	return nil
+}
+
+// CommitStatement commits the open statement group: it logs the commit
+// record, makes the log durable through it, and returns its LSN. On error
+// the statement may or may not be committed; the caller must Abandon.
+func (e *Engine) CommitStatement(ctx context.Context) (LSN, error) {
+	if e.horizon.Load() == 0 {
+		return 0, ErrStatement
+	}
+	payload := binary.LittleEndian.AppendUint64(nil, uint64(e.stmtBegin))
+	lsn, err := e.w.Append(ctx, RecordStmtCommit, payload)
+	if err == nil {
+		err = e.w.FlushTo(ctx, lsn)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("committing a statement: %w", err)
+	}
+	e.horizon.Store(0)
+	e.stmtMu.Unlock()
+	return lsn, nil
+}
+
+// Abandon closes the engine as a crash would: the buffer pool is dropped
+// without being written, so an unfinished statement's changes are lost and
+// recovery at the next OpenEngine discards its records. Use it when a
+// statement fails after BeginStatement.
+func (e *Engine) Abandon() error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return ErrClosed
+	}
+	e.closed = true
+	e.mu.Unlock()
+	return e.closeAll()
 }
 
 // Recovery returns what recovery did when the engine was opened.
@@ -217,11 +360,14 @@ func (e *Engine) Flush(ctx context.Context) error {
 	return e.w.Flush(ctx)
 }
 
-// Checkpoint takes a checkpoint.
+// Checkpoint takes a checkpoint. It waits for an open statement to commit:
+// a checkpoint must not write that statement's pages.
 func (e *Engine) Checkpoint(ctx context.Context) (Control, error) {
 	if err := e.check(); err != nil {
 		return Control{}, err
 	}
+	e.stmtMu.Lock()
+	defer e.stmtMu.Unlock()
 	return e.ck.Checkpoint(ctx)
 }
 
@@ -245,6 +391,10 @@ func (e *Engine) Close(ctx context.Context) error {
 	}
 	e.closed = true
 	e.mu.Unlock()
+	if e.horizon.Load() != 0 {
+		// A statement is open: closing normally would write its pages.
+		return errors.Join(fmt.Errorf("closing with a statement open: %w", ErrStatement), e.closeAll())
+	}
 	_, err := e.ck.Checkpoint(ctx)
 	if err == nil {
 		err = e.bp.Close(ctx)

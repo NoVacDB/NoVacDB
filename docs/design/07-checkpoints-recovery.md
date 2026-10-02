@@ -93,7 +93,7 @@ A crash at any point leaves the previous control file in force. Its redo point i
    - If the control file exists, read the checkpoint record it names and require it to be a checkpoint record carrying the same redo LSN; otherwise `ErrCorrupt`.
    - If there is no control file, replay from the first record. That is only allowed if the log still starts at LSN 0; a trimmed log without a control file is `ErrCorrupt`.
 3. Create the buffer pool with both WAL hooks, and a `Logger` whose redo point is that redo LSN.
-4. **Redo:** read every record from the redo LSN to the end (`wal.Reader`). Heap records go to `storage.RedoHeapRecord`, checkpoint records are skipped, and anything else is `ErrCorrupt`. Each block is redone:
+4. **Redo:** read every record from the redo LSN to the end (`wal.Reader`). Heap records go to `storage.RedoHeapRecord`, checkpoint records are skipped, and anything else is `ErrCorrupt`. (Since Step 4.4 a first pass finds statement groups that never committed, and their records are skipped too; see 10-executor.md section 2.4.) Each block is redone:
    - An image is installed unconditionally (via `PinForOverwrite`) and stamped with the record's LSN.
    - An operation is applied only if the page's LSN is lower than the record's (otherwise the page already contains it), then stamped.
    - Replay is sequential and in LSN order, so replaying again after a crash during recovery gives the same result.
@@ -142,7 +142,7 @@ It does not remember which heaps exist; that is the catalog (Step 4.4). Its call
 
 All integers little-endian.
 
-**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint, `3` B+Tree change (format in 08-btree.md).
+**WAL record types** (`wal.RecordType`): `1` heap operation, `2` checkpoint, `3` B+Tree change (format in 08-btree.md), `4` statement begin and `5` statement commit (format and meaning in 10-executor.md, sections 2.4 and 3).
 
 **Heap record payload** (the WAL record's payload, type 1):
 

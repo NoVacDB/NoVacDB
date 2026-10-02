@@ -15,6 +15,11 @@ const (
 	RecordCheckpoint RecordType = 2
 	// RecordBTree is a B+Tree change (btree.DecodeRecord).
 	RecordBTree RecordType = 3
+	// RecordStmtBegin starts a statement group; its payload is empty.
+	RecordStmtBegin RecordType = 4
+	// RecordStmtCommit ends a statement group; its payload is the begin
+	// record's LSN.
+	RecordStmtCommit RecordType = 5
 )
 
 // Logger connects heaps and B+Trees to the log (it implements

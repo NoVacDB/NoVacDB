@@ -8,7 +8,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 
 ## Current step
 
-👉 **Step 4.4 — Catalog** (design in `10-executor.md`)
+👉 **Step 4.5 — Executor** (design in `10-executor.md`)
 
 ---
 
@@ -35,6 +35,7 @@ This file is the step-by-step build plan. Each step is sized for roughly one foc
 | 2026-10-02 | 4.1 Lexer | ✅ Done | Design doc `09-sql-frontend.md` (lexer, parser, errors). `internal/sql/sqlerr` (SQLSTATE errors with character positions and hints) and the lexer in `internal/sql/parser`: PostgreSQL identifier folding and quoting, keyword categories, standard/escape/dollar-quoted strings with newline continuation, PostgreSQL 16 number forms with trailing-junk errors, parameters, operator cutting, nested comments. Names over 63 bytes are rejected, not truncated. FuzzLex; 33 deliberate-bug checks (2 equivalent). |
 | 2026-10-02 | 4.2 Parser and AST | ✅ Done | Recursive-descent parser for CREATE/DROP TABLE, CREATE/DROP INDEX, INSERT, SELECT (WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT), UPDATE, DELETE; PostgreSQL precedence, keyword categories, typed literals, CASE, casts, parameters; `0A000` with position for recognised but unsupported syntax. `internal/sql/ast` prints every tree back to SQL; FuzzParse checks parse → print → parse. 36 deliberate-bug checks (2 equivalent, removed as redundant code). |
 | 2026-10-02 | 4.3 Types and values | ✅ Done | Design doc `10-executor.md` (types, rows, catalog, atomic statements, executor). `internal/sql/types`: integer, bigint, double precision, text, boolean, timestamptz with PostgreSQL's input/output forms, three-valued logic, overflow-checked arithmetic, casts, LIKE; row (tuple) encoding and order-preserving index keys. Arithmetic checked against math/big on 200k random operand pairs; key order equals Compare order. Found and fixed a double-rounding bug in fractional seconds. 2 fuzz targets; 46 deliberate-bug checks (2 equivalent). |
+| 2026-10-02 | 4.4 Catalog | ✅ Done | Atomic statements: WAL statement-begin/commit records (types 4, 5), "no steal" through the existing WAL-rule hook, two-pass recovery that discards unfinished groups, `Engine.Abandon`. `internal/catalog`: tables, columns and indexes in three system heaps plus a once-written catalog file; PostgreSQL index naming; DDL whose `*sqlerr.Error` failures change nothing. Randomized DDL-and-crash test against a model (1000 seeded runs) and statement crash test (1500 runs); injected I/O failure at every point of a DDL statement; 87 deliberate-bug checks (1 equivalent piece of code removed). Fixed a Phase 3 B+Tree concurrency test that failed without `-race`. |
 
 ---
 
@@ -144,10 +145,10 @@ Tokens for keywords, identifiers (PostgreSQL case rules), string and numeric lit
 ### ✅ Step 4.3 — Types and values
 `INTEGER`, `BIGINT`, `DOUBLE PRECISION`, `TEXT`, `BOOLEAN`, `TIMESTAMPTZ`, SQL `NULL` semantics (three-valued logic), row encoding into heap tuples.
 
-### 👉 Step 4.4 — Catalog
+### ✅ Step 4.4 — Catalog
 Tables, columns, and indexes stored in system tables on disk, loaded at startup.
 
-### ⬜ Step 4.5 — Executor
+### 👉 Step 4.5 — Executor
 Iterator (Volcano) model: sequential scan, index scan, filter, projection, sort, limit, insert, update, delete. Design doc `10-executor.md`.
 
 ### ⬜ Step 4.6 — SQL logic tests

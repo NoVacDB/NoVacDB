@@ -25,6 +25,51 @@ func (c *concModel) stripe(k []byte) *sync.Mutex {
 	return &c.stripes[binary.LittleEndian.Uint32(append(bytes.Clone(k), 0, 0, 0, 0))%64]
 }
 
+// phaseBarrier makes the writers enter each grow or shrink phase together,
+// so the phases overlap however the goroutines are scheduled: a writer that
+// runs ahead would otherwise grow while the others shrink, and the tree
+// might never shrink enough to merge. A failed writer breaks the barrier so
+// the others do not wait for it forever.
+type phaseBarrier struct {
+	mu      sync.Mutex
+	n       int
+	waiting int
+	gen     chan struct{}
+	broken  bool
+}
+
+func newPhaseBarrier(n int) *phaseBarrier {
+	return &phaseBarrier{n: n, gen: make(chan struct{})}
+}
+
+func (b *phaseBarrier) wait() {
+	b.mu.Lock()
+	if b.broken {
+		b.mu.Unlock()
+		return
+	}
+	b.waiting++
+	if b.waiting == b.n {
+		close(b.gen)
+		b.gen = make(chan struct{})
+		b.waiting = 0
+		b.mu.Unlock()
+		return
+	}
+	ch := b.gen
+	b.mu.Unlock()
+	<-ch
+}
+
+func (b *phaseBarrier) breakAll() {
+	b.mu.Lock()
+	if !b.broken {
+		b.broken = true
+		close(b.gen)
+	}
+	b.mu.Unlock()
+}
+
 // concKey makes keys from a shared space, with a stable prefix for keys
 // that are never touched after setup.
 func concKey(stable bool, n int, pad int) []byte {
@@ -55,13 +100,18 @@ func runConcurrent(t *testing.T, tr *Tree, writers, readers, scanners, opsPerWri
 	var wg, bg2 sync.WaitGroup
 	errc := make(chan error, writers+readers+scanners)
 	var reads, scans, scanned atomic.Int64
+	phases := newPhaseBarrier(writers)
+	phaseLen := max(opsPerWriter/6, 1)
 	for w := range writers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(seed, uint64(w)))
 			for op := range opsPerWriter {
-				growing := (op/(opsPerWriter/6))%2 == 0
+				if op > 0 && op%phaseLen == 0 {
+					phases.wait()
+				}
+				growing := (op/phaseLen)%2 == 0
 				k := concKey(false, rng.IntN(stableKeys)*97+1+rng.IntN(6), pad)
 				mu := cm.stripe(k)
 				mu.Lock()
@@ -96,6 +146,7 @@ func runConcurrent(t *testing.T, tr *Tree, writers, readers, scanners, opsPerWri
 				}
 				mu.Unlock()
 				if err != nil {
+					phases.breakAll()
 					errc <- fmt.Errorf("writer %d op %d: %w", w, op, err)
 					return
 				}

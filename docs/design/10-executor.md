@@ -2,7 +2,7 @@
 
 Packages: `internal/sql/types` (Step 4.3), `internal/catalog` and `internal/wal` (Step 4.4), `internal/sql/executor` (Step 4.5).
 
-Status: **Designed for Steps 4.3–4.5; each part is implemented in its step. Implemented so far: 4.3.** Written and approved under the standing autonomous-mode instruction.
+Status: **Designed for Steps 4.3–4.5; each part is implemented in its step. Implemented so far: 4.3, 4.4.** Written and approved under the standing autonomous-mode instruction.
 
 The three steps share one document because they constrain each other: the row format serves the catalog, the catalog's changes must be atomic like any statement's, and the executor's write path is built around that atomicity.
 
@@ -92,7 +92,7 @@ Every statement that changes the database runs as a **statement group** in the W
 Two rules make the group all or nothing.
 
 - **No page changed by an unfinished statement reaches disk.** While a horizon is set, the WAL-rule hook the buffer pool already consults (`FlushedLSN`) reports the log as durable only up to the horizon. Every page the statement changed carries an LSN at or after the horizon, so the pool cannot evict or flush it; eviction picks other pages. ("No steal", built on the existing WAL rule without changing the buffer pool.) A checkpoint cannot run during a statement either: the engine makes it wait.
-- **Recovery replays only committed groups.** A first pass over the log, from the redo point, finds every group that began and never committed: a begin followed by another begin or by the end of the log. The second pass replays everything except those groups' records. Records outside any group (from code that does not use statements, such as the crash tests of Phases 2 and 3) replay as before.
+- **Recovery replays only committed groups.** A first pass over the log, from the redo point, finds every group that began and never committed: a begin followed by another begin, by a checkpoint record (a checkpoint never runs inside a statement, so one that follows an open group means the group was abandoned) or by the end of the log. The second pass replays everything except those groups' records. Records outside any group (from code that does not use statements, such as the crash tests of Phases 2 and 3) replay as before.
 
 The disk never holds a change from an uncommitted statement, and the log holds the rest, so after recovery each statement is entirely present or entirely absent.
 
@@ -139,6 +139,15 @@ It is written once, when the database is created: the three heaps are created in
 - `CREATE INDEX` first scans the table and checks uniqueness for a unique index (`23505`, with the duplicated key). Only then does it create the B+Tree and fill it.
 - `DROP TABLE` deletes the catalog rows of the table, its columns and its indexes. `DROP INDEX` deletes the index's row; a primary key's index cannot be dropped alone (`2BP01`).
 - The pages of a dropped table or index are freed as unlinked B+Tree pages are: the engine's checkpointer frees them once its redo point has passed the drop's commit record (08-btree.md section 2.7).
+
+**Errors and abandoning.** The DDL methods follow one rule, which tells the executor whether a failed statement can still commit: a `*sqlerr.Error` means nothing was changed; any other error (I/O, a full pool, a damaged page) may leave part of the change made, and the executor must abandon the statement (2.4). Everything that can fail with a SQL error is therefore checked before the first change: names (reserved, taken, empty or over 63 bytes), duplicate and missing columns, column and key-column counts, the size of each catalog row (a long `DEFAULT` can overflow one), and, for `CREATE INDEX` on a table with rows, uniqueness and key sizes.
+
+### 2.5.1 Implementation notes (Step 4.4)
+
+- **Index column limit.** An index (and so a primary key or unique constraint) may name at most 32 columns, PostgreSQL's `INDEX_MAX_KEYS` (`54011`). Besides matching PostgreSQL, it bounds the `columns` text of a catalog row, so that row always fits.
+- **Listing pages to free.** `storage.Heap.Pages` returns a heap's chain; `btree.Tree.Pages` walks a tree and requires every child to sit exactly one level below its parent and to be reached once, so a damaged tree fails with `ErrCorruptNode` instead of looping or listing a page twice. `DropTable` and `DropIndex` list every page before their first change.
+- **Recovery statistics.** `RecoveryStats` gains `DiscardedStatements` (groups dropped) and `Discarded` (their records, begin records included). Tests use them to pin the boundaries of each discarded group exactly.
+- **A pre-existing flaky test, fixed.** `TestConcurrentWritersReadersScanners` (Phase 3) failed almost every time without the race detector: its writers drifted out of step, so the tree never shrank enough to merge, and its "merges happened" assertion failed. Its writers now meet at a barrier between grow and shrink phases, as the test intended; the assertion is unchanged.
 
 ### 2.6 Executor (Step 4.5)
 
@@ -209,8 +218,8 @@ The database lock (2.6) serialises writers and excludes readers during writes. U
 ## 7. Testing plan
 
 - **Types (4.3):** a table of inputs and outputs for every type, including bounds, special values and every error; arithmetic and comparison against Go reference computations, for random values; casts in both directions; three-valued logic truth tables; round trips value → text → value and value → tuple → value; key encoding order equal to `Compare` order for random values; `FuzzDecodeRow` and `FuzzParseValue` (no panics, round trips).
-- **Catalog (4.4):** create and drop tables and indexes, reload after reopen and after a crash; name rules; system-table protection; bootstrap interrupted at every point; corrupt catalog file and rows.
-- **Statements (4.4):** a group's pages never reach disk before commit, even with a tiny pool; crash at every point of a multi-page statement leaves it all or nothing; `Abandon` and reopen discard it; checkpoints wait for statements.
+- **Catalog (4.4):** create and drop tables and indexes, reload after reopen and after a crash; name rules; system-table protection; bootstrap interrupted at every point; corrupt catalog file and rows; IDs unique across reloads; loading independent of system-row order; failed DDL changes nothing (memory and disk) and returns `*sqlerr.Error`; an injected write or sync failure at every point of a multi-DDL statement leaves the catalog exactly before or (only if the commit itself failed) exactly after; a randomized workload of DDL and rows with crashes inside statements, checkpoints that free dropped pages, and reopenings, checked against a model, table by table and index entry by index entry.
+- **Statements (4.4):** a group's pages never reach disk before commit, even with a tiny pool; crash at every point of a multi-page statement leaves it all or nothing; `Abandon` and reopen discard it; checkpoints wait for statements; crafted logs of begin, commit and checkpoint records give exactly the expected discarded groups and records; mismatched or orphan commits are `ErrCorrupt`.
 - **Executor (4.5):** every statement form, error code and position; type resolution; index scans return exactly what sequential scans return, for random data and predicates; uniqueness and NOT NULL in every path; concurrent readers with a writer under `-race`; a self-restart after an injected I/O failure.
 - **SQL logic tests (4.6)** cover the statements end to end, and the crash harness gains an SQL workload whose statements must each be all or nothing after any crash.
 

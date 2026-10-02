@@ -298,3 +298,49 @@ func (t *Tree) check(ctx context.Context, id uint64, n node, lo, hi bound, isRoo
 	}
 	return nil
 }
+
+// Pages returns the IDs of every page of the tree, for freeing them when
+// the tree is dropped. Like Check, it is meant for a tree no one is
+// changing. Each child must be one level below its parent and reachable
+// once, so a damaged tree cannot make it loop or revisit pages.
+func (t *Tree) Pages(ctx context.Context) ([]uint64, error) {
+	type item struct {
+		id    uint64
+		level int // -1: the root, whose level is whatever it says
+	}
+	todo := []item{{t.root, -1}}
+	// The level check already rules out a pointer back to the root, which
+	// is above every other node.
+	seen := map[uint64]bool{}
+	var ids []uint64
+	for len(todo) > 0 {
+		it := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		ref, n, err := t.fetch(ctx, it.id, false)
+		if err != nil {
+			return nil, fmt.Errorf("listing pages: page %d: %w", it.id, err)
+		}
+		if it.level >= 0 && n.level() != it.level {
+			release(ref, false)
+			return nil, corrupt("listing pages: page %d at level %d, expected %d", it.id, n.level(), it.level)
+		}
+		ids = append(ids, it.id)
+		if !n.isLeaf() {
+			for pos := 0; pos <= n.numCells(); pos++ {
+				c, err := n.childAt(pos)
+				if err != nil {
+					release(ref, false)
+					return nil, fmt.Errorf("listing pages: page %d: %w", it.id, err)
+				}
+				if seen[c] {
+					release(ref, false)
+					return nil, corrupt("listing pages: page %d is reachable twice", c)
+				}
+				seen[c] = true
+				todo = append(todo, item{c, n.level() - 1})
+			}
+		}
+		release(ref, false)
+	}
+	return ids, nil
+}

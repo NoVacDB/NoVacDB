@@ -1165,3 +1165,33 @@ func BenchmarkHeapScan(b *testing.B) {
 		}
 	}
 }
+
+func TestHeapPagesFollowTheChain(t *testing.T) {
+	const frames = 8
+	e, h := newHeapEnv(t, frames)
+	if got := h.Pages(); len(got) != 1 || got[0] != h.FirstPage() {
+		t.Fatalf("new heap: pages %v, first %d", got, h.FirstPage())
+	}
+	pages := map[uint64]bool{}
+	for i := range 200 {
+		rid, err := h.Insert(bg, bytes.Repeat([]byte{byte(i)}, 300))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages[rid.Page] = true
+	}
+	got := h.Pages()
+	if len(got) != h.NumPages() || len(got) != len(pages) || got[0] != h.FirstPage() {
+		t.Fatalf("pages %v: %d pages, %d used by rows, first %d", got, h.NumPages(), len(pages), h.FirstPage())
+	}
+	for _, id := range got {
+		if !pages[id] {
+			t.Fatalf("page %d of %v holds no row", id, got)
+		}
+		delete(pages, id) // also catches duplicates
+	}
+	_, h = reopen(t, e, h, frames)
+	if again := h.Pages(); !slices.Equal(again, got) {
+		t.Fatalf("after reopening: %v, want %v", again, got)
+	}
+}

@@ -362,3 +362,100 @@ func TestCheckReportsUnderfullAndEmptyNodes(t *testing.T) {
 		}
 	}
 }
+
+func TestPagesListsEveryNodeOnce(t *testing.T) {
+	for _, c := range []struct{ n, perLeaf, fanout int }{{0, 4, 3}, {4, 4, 3}, {13, 4, 3}, {200, 3, 2}} {
+		bp := newPool(t, 8)
+		tr := buildTree(t, bp, intKeys(c.n, 1), c.perLeaf, c.fanout)
+		st, err := tr.Check(bg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids, err := tr.Pages(bg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[uint64]bool{}
+		for _, id := range ids {
+			if seen[id] {
+				t.Fatalf("n=%d: page %d listed twice", c.n, id)
+			}
+			seen[id] = true
+		}
+		// buildTree allocates exactly the tree's pages, from the first data page.
+		if len(ids) != st.Nodes || !seen[tr.Root()] {
+			t.Fatalf("n=%d: %d pages %v, want %d including root %d", c.n, len(ids), ids, st.Nodes, tr.Root())
+		}
+		for id := uint64(storage.FirstDataPage); id < storage.FirstDataPage+uint64(st.Nodes); id++ {
+			if !seen[id] {
+				t.Fatalf("n=%d: page %d missing from %v", c.n, id, ids)
+			}
+		}
+		if err := bp.Close(bg); err != nil {
+			t.Fatalf("pages left pinned: %v", err)
+		}
+	}
+}
+
+func TestPagesRejectsDamagedTrees(t *testing.T) {
+	damage := map[string]func(bp *storage.BufferPool) *Tree{
+		"child reachable twice": func(bp *storage.BufferPool) *Tree {
+			leaf, _, ref := newNodePage(t, bp, true, 0)
+			_ = ref.Unpin(true)
+			root, n, ref := newNodePage(t, bp, false, 1)
+			n.setChild0(leaf)
+			if err := n.insertInner(0, []byte("m"), leaf); err != nil {
+				t.Fatal(err)
+			}
+			_ = ref.Unpin(true)
+			return &Tree{bp: bp, root: root}
+		},
+		"child points at root": func(bp *storage.BufferPool) *Tree {
+			root, n, ref := newNodePage(t, bp, false, 1)
+			n.setChild0(root)
+			_ = ref.Unpin(true)
+			return &Tree{bp: bp, root: root}
+		},
+		"child skips a level": func(bp *storage.BufferPool) *Tree {
+			leaf, _, ref := newNodePage(t, bp, true, 0)
+			_ = ref.Unpin(true)
+			root, n, ref := newNodePage(t, bp, false, 2)
+			n.setChild0(leaf)
+			_ = ref.Unpin(true)
+			return &Tree{bp: bp, root: root}
+		},
+		"child level": func(bp *storage.BufferPool) *Tree {
+			tr := buildTree(t, bp, intKeys(60, 1), 4, 3)
+			mutatePage(t, bp, leftmostLeaf(t, bp, tr.Root()), func(n node) {
+				binary.LittleEndian.PutUint16(n.b[20:], uint16(storage.PageTypeBTreeInternal))
+				n.put16(offLevel, 5)
+				n.setChild0(storage.FirstDataPage)
+			})
+			return tr
+		},
+		"child type": func(bp *storage.BufferPool) *Tree {
+			tr := buildTree(t, bp, intKeys(60, 1), 4, 3)
+			mutatePage(t, bp, leftmostLeaf(t, bp, tr.Root()), func(n node) {
+				binary.LittleEndian.PutUint16(n.b[20:], uint16(storage.PageTypeHeap))
+			})
+			return tr
+		},
+		"internal slot": func(bp *storage.BufferPool) *Tree {
+			tr := buildTree(t, bp, intKeys(60, 1), 4, 3)
+			mutatePage(t, bp, tr.Root(), func(n node) { n.put16(slotsStart, 1) })
+			return tr
+		},
+	}
+	for name, d := range damage {
+		t.Run(name, func(t *testing.T) {
+			bp := newPool(t, 16)
+			tr := d(bp)
+			if ids, err := tr.Pages(bg); !errors.Is(err, ErrCorruptNode) {
+				t.Fatalf("got %v, %v", ids, err)
+			}
+			if err := bp.Close(bg); err != nil {
+				t.Fatalf("pages left pinned: %v", err)
+			}
+		})
+	}
+}

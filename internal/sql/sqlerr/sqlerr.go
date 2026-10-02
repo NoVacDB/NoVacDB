@@ -48,6 +48,8 @@ const (
 	NameTooLong                  = "42622"
 	ReservedName                 = "42939"
 	ProgramLimitExceeded         = "54000"
+	TooManyColumns               = "54011"
+	DependentObjectsStillExist   = "2BP01"
 	StatementTooComplex          = "54001"
 	ObjectNotInPrerequisiteState = "55000"
 	QueryCanceled                = "57014"

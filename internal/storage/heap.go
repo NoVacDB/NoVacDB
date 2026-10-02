@@ -176,6 +176,18 @@ func OpenHeap(ctx context.Context, bp *BufferPool, first uint64, opts ...HeapOpt
 // FirstPage returns the ID that identifies this heap; OpenHeap takes it.
 func (h *Heap) FirstPage() uint64 { return h.first }
 
+// Pages returns the IDs of the heap's pages in chain order, for freeing
+// them when the heap is dropped.
+func (h *Heap) Pages() []uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ids := make([]uint64, len(h.pages))
+	for i, p := range h.pages {
+		ids[i] = p.id
+	}
+	return ids
+}
+
 // NumPages returns the number of pages in the heap.
 func (h *Heap) NumPages() int {
 	h.mu.Lock()
