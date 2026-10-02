@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/pgwire"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/executor"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/types"
 )
 
 // conn is one client connection.
@@ -231,12 +233,12 @@ func (s *session) parameterStatus(serverVersion string) []pgwire.Param {
 	}
 }
 
-// serve runs the session after startup. In Step 5.1 it handles Terminate,
-// answers Query with "not implemented yet", and rejects every other
-// message type (design doc section 2.4). It returns nil when the client
-// terminates, a *sqlerr.Error to send as FATAL, or a network error.
+// serve runs the session after startup (design doc sections 2.4 and 2.8).
+// It returns nil when the client terminates, a *sqlerr.Error to send as
+// FATAL, or a network error.
 func (cn *conn) serve() error {
 	rd := pgwire.NewReader(cn.br)
+	skipToSync := false // after an error in an extended-protocol sequence
 	for {
 		if err := cn.flush(); err != nil {
 			return err
@@ -249,17 +251,108 @@ func (cn *conn) serve() error {
 			return err
 		}
 		switch typ {
-		case 'X':
+		case 'X': // Terminate
 			return nil
-		case 'Q':
-			if _, err := pgwire.ParseQuery(body); err != nil {
+		case 'Q': // Query
+			sql, err := pgwire.ParseQuery(body)
+			if err != nil {
 				return protocolViolation(err)
 			}
-			cn.out.ErrorResponse(errorFields(pgwire.SeverityError,
-				sqlerr.New(sqlerr.FeatureNotSupported, "the simple query protocol is not implemented yet")))
+			if err := cn.query(sql); err != nil {
+				return err
+			}
 			cn.out.ReadyForQuery(pgwire.StatusIdle)
+		case 'P', 'B', 'D', 'E', 'C', 'H': // Parse, Bind, Describe, Execute, Close, Flush
+			if !skipToSync {
+				cn.out.ErrorResponse(errorFields(pgwire.SeverityError,
+					sqlerr.New(sqlerr.FeatureNotSupported, "the extended query protocol is not implemented yet")))
+				skipToSync = true
+			}
+		case 'S': // Sync
+			skipToSync = false
+			cn.out.ReadyForQuery(pgwire.StatusIdle)
+		case 'F': // FunctionCall
+			cn.out.ErrorResponse(errorFields(pgwire.SeverityError,
+				sqlerr.New(sqlerr.FeatureNotSupported, "function calls through the protocol are not supported")))
+			cn.out.ReadyForQuery(pgwire.StatusIdle)
+		case 'd', 'c', 'f': // CopyData, CopyDone, CopyFail outside a COPY: ignored, as PostgreSQL does
 		default:
 			return sqlerr.New(sqlerr.ProtocolViolation, "invalid frontend message type %d", typ)
 		}
 	}
+}
+
+// flushAt is how much output is buffered before it is written, while a
+// result is being sent.
+const flushAt = 64 << 10
+
+// query runs a Query message's statements and sends their results (design
+// doc section 2.8). A statement's error is sent as an ErrorResponse and
+// ends the query; only a failure to write to the client is returned.
+func (cn *conn) query(sql string) error {
+	results, err := cn.s.cfg.DB.Exec(cn.s.ctx, sql)
+	if len(results) == 0 && err == nil {
+		cn.out.EmptyQueryResponse()
+		return nil
+	}
+	for _, r := range results {
+		if err := cn.sendResult(r); err != nil {
+			return err
+		}
+	}
+	if err != nil {
+		cn.out.ErrorResponse(errorFields(pgwire.SeverityError, sqlerr.From(err)))
+	}
+	return nil
+}
+
+// sendResult sends one statement's notices, rows and command tag, writing
+// out the buffer whenever it grows past flushAt.
+func (cn *conn) sendResult(r *executor.Result) error {
+	for _, n := range r.Notices {
+		cn.out.NoticeResponse(pgwire.ErrorFields{Severity: pgwire.SeverityNotice, Code: n.Code, Message: n.Message})
+	}
+	if r.Columns != nil {
+		fields := make([]pgwire.FieldDescription, len(r.Columns))
+		for i, c := range r.Columns {
+			oid, size := typeInfo(c.Type)
+			fields[i] = pgwire.FieldDescription{Name: c.Name, TypeOID: oid, Size: size}
+		}
+		cn.out.RowDescription(fields)
+		vals := make([][]byte, len(r.Columns))
+		for _, row := range r.Rows {
+			for i, v := range row {
+				if v.Null {
+					vals[i] = nil
+				} else {
+					vals[i] = []byte(types.Format(v))
+				}
+			}
+			cn.out.DataRow(vals)
+			if cn.out.Len() >= flushAt {
+				if err := cn.flush(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	cn.out.CommandComplete(r.Tag)
+	return nil
+}
+
+// typeInfo returns a column type's PostgreSQL OID and size.
+func typeInfo(t types.Type) (oid uint32, size int16) {
+	switch t {
+	case types.Int4:
+		return pgwire.OIDInt4, 4
+	case types.Int8:
+		return pgwire.OIDInt8, 8
+	case types.Float8:
+		return pgwire.OIDFloat8, 8
+	case types.Bool:
+		return pgwire.OIDBool, 1
+	case types.TimestampTZ:
+		return pgwire.OIDTimestampTZ, 8
+	}
+	return pgwire.OIDText, -1
 }

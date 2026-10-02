@@ -13,7 +13,7 @@ import (
 func (st *stmt) createTable(s *ast.CreateTable) (*Result, error) {
 	res := &Result{Tag: "CREATE TABLE"}
 	if st.db.cat.Exists(s.Name.Name) && s.IfNotExists {
-		res.Notices = append(res.Notices, "relation \""+s.Name.Name+"\" already exists, skipping")
+		res.Notices = append(res.Notices, Notice{sqlerr.DuplicateTable, "relation \"" + s.Name.Name + "\" already exists, skipping"})
 		return res, nil
 	}
 	def := catalog.TableDef{Name: s.Name.Name}
@@ -94,7 +94,7 @@ func (st *stmt) dropTable(s *ast.DropTable) (*Result, error) {
 		return nil, sqlerr.New(sqlerr.WrongObjectType, "%q is not a table", s.Name.Name).
 			WithHint("Use DROP INDEX to remove an index.").At(st.sql, s.Name.P)
 	case !ok && s.IfExists:
-		res.Notices = append(res.Notices, "table \""+s.Name.Name+"\" does not exist, skipping")
+		res.Notices = append(res.Notices, Notice{sqlerr.SuccessfulCompletion, "table \"" + s.Name.Name + "\" does not exist, skipping"})
 		return res, nil
 	case !ok:
 		return nil, sqlerr.New(sqlerr.UndefinedTable, "table %q does not exist", s.Name.Name).At(st.sql, s.Name.P)
@@ -136,7 +136,7 @@ func (st *stmt) createIndex(s *ast.CreateIndex) (*Result, error) {
 		return nil, err
 	}
 	if s.Name.Name != "" && st.db.cat.Exists(s.Name.Name) && s.IfNotExists {
-		res.Notices = append(res.Notices, "relation \""+s.Name.Name+"\" already exists, skipping")
+		res.Notices = append(res.Notices, Notice{sqlerr.DuplicateTable, "relation \"" + s.Name.Name + "\" already exists, skipping"})
 		return res, nil
 	}
 	cols := make([]string, len(s.Columns))
@@ -168,7 +168,7 @@ func (st *stmt) dropIndex(s *ast.DropIndex) (*Result, error) {
 		return nil, sqlerr.New(sqlerr.WrongObjectType, "%q is not an index", s.Name.Name).
 			WithHint("Use DROP TABLE to remove a table.").At(st.sql, s.Name.P)
 	case !ok && s.IfExists:
-		res.Notices = append(res.Notices, "index \""+s.Name.Name+"\" does not exist, skipping")
+		res.Notices = append(res.Notices, Notice{sqlerr.SuccessfulCompletion, "index \"" + s.Name.Name + "\" does not exist, skipping"})
 		return res, nil
 	case !ok:
 		return nil, sqlerr.New(sqlerr.UndefinedObject, "index %q does not exist", s.Name.Name).At(st.sql, s.Name.P)

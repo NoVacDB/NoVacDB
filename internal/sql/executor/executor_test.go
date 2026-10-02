@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -39,13 +40,62 @@ func TestBasicStatements(t *testing.T) {
 	if got := r.Rows[0][5].String(); got != "2024-05-06 07:08:09.5+00" {
 		t.Fatalf("now() = %s", got)
 	}
+	// An empty select list still makes a SELECT result: no columns, but
+	// non-nil, and one empty row per row, so a client gets them all.
+	r = mustExec(t, db, "SELECT FROM users")[0]
+	if r.Columns == nil || len(r.Columns) != 0 || len(r.Rows) != 2 || r.Tag != "SELECT 2" {
+		t.Fatalf("%+v", r)
+	}
+	if r = mustExec(t, db, "SELECT FROM users WHERE false")[0]; r.Columns == nil || r.Tag != "SELECT 0" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSelectColumnLimit(t *testing.T) {
+	db := newDB(t)
+	list := func(n int) string { return strings.Repeat("1, ", n-1) + "1" }
+	r := mustExec(t, db, "SELECT "+list(MaxSelectColumns))[0]
+	if len(r.Columns) != MaxSelectColumns || len(r.Rows[0]) != MaxSelectColumns {
+		t.Fatalf("%d columns", len(r.Columns))
+	}
+	// One more, or many more, is an error at the first target past the
+	// limit: the protocol's column count is 16 bits.
+	for _, n := range []int{MaxSelectColumns + 1, 70000} {
+		sql := "SELECT " + list(n)
+		e := expectErr(t, db, sql, sqlerr.TooManyColumns)
+		if e.Position != len("SELECT ")+3*MaxSelectColumns+1 {
+			t.Fatalf("%d columns: %v at %d", n, e, e.Position)
+		}
+	}
+	// Stars count every column they expand to.
+	cols := make([]string, 1000)
+	for i := range cols {
+		cols[i] = fmt.Sprintf("c%d int", i)
+	}
+	mustExec(t, db, "CREATE TABLE wide ("+strings.Join(cols, ", ")+")")
+	mustExec(t, db, "INSERT INTO wide (c0) VALUES (1)")
+	if r := mustExec(t, db, "SELECT *, "+list(MaxSelectColumns-1000)+" FROM wide")[0]; len(r.Columns) != MaxSelectColumns {
+		t.Fatalf("%d columns", len(r.Columns))
+	}
+	if e := expectErr(t, db, "SELECT *, * FROM wide", sqlerr.TooManyColumns); e.Position != len("SELECT *, ")+1 {
+		t.Fatalf("%v at %d", e, e.Position)
+	}
+	expectErr(t, db, "SELECT *, "+list(MaxSelectColumns-999)+" FROM wide", sqlerr.TooManyColumns)
+	// A star that ends exactly at the limit, and one that passes it by one.
+	if r := mustExec(t, db, "SELECT "+list(MaxSelectColumns-1000)+", * FROM wide")[0]; len(r.Columns) != MaxSelectColumns {
+		t.Fatalf("%d columns", len(r.Columns))
+	}
+	sql := "SELECT " + list(MaxSelectColumns-999) + ", * FROM wide"
+	if e := expectErr(t, db, sql, sqlerr.TooManyColumns); e.Position != strings.Index(sql, "*")+1 {
+		t.Fatalf("%v at %d", e, e.Position)
+	}
 }
 
 func TestDDLStatements(t *testing.T) {
 	db := newDB(t)
 	mustExec(t, db, "CREATE TABLE t (a int, b text)")
 	r := mustExec(t, db, "CREATE TABLE IF NOT EXISTS t (x int)")[0]
-	if r.Tag != "CREATE TABLE" || len(r.Notices) != 1 || r.Notices[0] != `relation "t" already exists, skipping` {
+	if r.Tag != "CREATE TABLE" || len(r.Notices) != 1 || r.Notices[0] != (Notice{sqlerr.DuplicateTable, `relation "t" already exists, skipping`}) {
 		t.Fatalf("%+v", r)
 	}
 	expectErr(t, db, "CREATE TABLE t (x int)", sqlerr.DuplicateTable)
@@ -58,7 +108,7 @@ func TestDDLStatements(t *testing.T) {
 	expectErr(t, db, "DROP INDEX t", sqlerr.WrongObjectType)
 	expectErr(t, db, "DROP INDEX nope", sqlerr.UndefinedObject)
 	expectErr(t, db, "DROP TABLE nope", sqlerr.UndefinedTable)
-	if r := mustExec(t, db, "DROP TABLE IF EXISTS nope; DROP INDEX IF EXISTS nope"); r[0].Notices[0] != `table "nope" does not exist, skipping` || r[1].Notices[0] != `index "nope" does not exist, skipping` {
+	if r := mustExec(t, db, "DROP TABLE IF EXISTS nope; DROP INDEX IF EXISTS nope"); r[0].Notices[0] != (Notice{"00000", `table "nope" does not exist, skipping`}) || r[1].Notices[0] != (Notice{"00000", `index "nope" does not exist, skipping`}) {
 		t.Fatalf("%+v %+v", r[0], r[1])
 	}
 	mustExec(t, db, "DROP INDEX tb")

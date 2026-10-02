@@ -38,7 +38,7 @@ func EncodeRow(vals []Value, cols []Type) ([]byte, error) {
 		return nil, sqlerr.New(sqlerr.InternalError, "encoding a row of %d values for %d columns", len(vals), len(cols))
 	}
 	n := len(cols)
-	out := make([]byte, rowHeaderSize+(n+7)/8, 64)
+	out := make([]byte, rowHeaderSize+(n+7)/8, max(64, rowHeaderSize+(n+7)/8))
 	out[0] = rowVersion
 	binary.LittleEndian.PutUint16(out[1:], uint16(n))
 	for i, v := range vals {

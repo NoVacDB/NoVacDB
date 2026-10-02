@@ -125,3 +125,69 @@ func (w *Buffer) fields(typ byte, f ErrorFields) {
 	w.b = append(w.b, 0)
 	w.end(at)
 }
+
+// Type OIDs of the types NoVacDB sends (PostgreSQL's pg_type OIDs).
+const (
+	OIDBool        = 16
+	OIDInt8        = 20
+	OIDInt4        = 23
+	OIDText        = 25
+	OIDFloat8      = 701
+	OIDTimestampTZ = 1184
+)
+
+// FieldDescription describes one column of a RowDescription. NoVacDB's
+// columns are always computed (table OID and attribute number 0), with no
+// type modifier, in text format.
+type FieldDescription struct {
+	Name    string
+	TypeOID uint32
+	Size    int16 // -1 for variable length
+}
+
+// RowDescription ('T').
+func (w *Buffer) RowDescription(fields []FieldDescription) {
+	at := w.begin('T')
+	w.b = binary.BigEndian.AppendUint16(w.b, uint16(len(fields)))
+	for _, f := range fields {
+		w.str(f.Name)
+		w.int32(0)                                  // table OID
+		w.b = binary.BigEndian.AppendUint16(w.b, 0) // attribute number
+		w.int32(int32(f.TypeOID))                   // type OID
+		w.b = binary.BigEndian.AppendUint16(w.b, uint16(f.Size))
+		w.int32(-1)                                 // type modifier
+		w.b = binary.BigEndian.AppendUint16(w.b, 0) // text format
+	}
+	w.end(at)
+}
+
+// DataRow ('D'): each value in text form, or nil for NULL.
+func (w *Buffer) DataRow(values [][]byte) {
+	at := w.begin('D')
+	w.b = binary.BigEndian.AppendUint16(w.b, uint16(len(values)))
+	for _, v := range values {
+		if v == nil {
+			w.int32(-1)
+			continue
+		}
+		w.int32(int32(len(v)))
+		w.b = append(w.b, v...)
+	}
+	w.end(at)
+}
+
+// CommandComplete ('C') with a command tag.
+func (w *Buffer) CommandComplete(tag string) {
+	at := w.begin('C')
+	w.str(tag)
+	w.end(at)
+}
+
+// EmptyQueryResponse ('I'): the query string held no statement.
+func (w *Buffer) EmptyQueryResponse() {
+	at := w.begin('I')
+	w.end(at)
+}
+
+// Len returns how many bytes are buffered.
+func (w *Buffer) Len() int { return len(w.b) }

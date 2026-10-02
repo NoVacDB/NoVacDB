@@ -574,6 +574,38 @@ func TestRowRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWideRows(t *testing.T) {
+	// Up to MaxColumns, past the sizes where the null bitmap outgrows a
+	// small first allocation: every column NULL, then every column set.
+	for _, n := range []int{0, 1, 8, 9, 487, 488, 489, 490, 1000, MaxColumns} {
+		cols := make([]Type, n)
+		nulls, set := make([]Value, n), make([]Value, n)
+		for i := range cols {
+			cols[i] = Int4
+			nulls[i] = Null(Int4)
+			set[i] = NewInt4(int32(i))
+		}
+		for _, vals := range [][]Value{nulls, set} {
+			b, err := EncodeRow(vals, cols)
+			if err != nil {
+				t.Fatalf("%d columns: %v", n, err)
+			}
+			got, err := DecodeRow(b, cols)
+			if err != nil {
+				t.Fatalf("%d columns: %v", n, err)
+			}
+			for i := range vals {
+				if got[i].Null != vals[i].Null || !got[i].Null && got[i].I != vals[i].I {
+					t.Fatalf("%d columns, column %d: %v, want %v", n, i, got[i], vals[i])
+				}
+			}
+		}
+	}
+	if _, err := EncodeRow(make([]Value, MaxColumns+1), make([]Type, MaxColumns+1)); code(err) != sqlerr.InternalError {
+		t.Fatal(err)
+	}
+}
+
 func TestRowGoldenBytes(t *testing.T) {
 	cols := []Type{Int4, Text, Bool, Int8, Float8, TimestampTZ, Int4}
 	vals := []Value{NewInt4(-2), NewText("hé"), NewBool(true), Null(Int8), NewFloat8(1), NewTimestampTZ(1), Null(Int4)}

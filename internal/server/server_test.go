@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"time"
 
 	"github.com/vikrant-choudhary06/NoVacDB/internal/pgwire"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/executor"
 	"github.com/vikrant-choudhary06/NoVacDB/internal/sql/sqlerr"
+	"github.com/vikrant-choudhary06/NoVacDB/internal/vfs"
 )
 
 // startServer serves on a loopback port until the test ends.
@@ -24,6 +27,9 @@ func startServer(t *testing.T, cfg Config) (*Server, string) {
 	t.Helper()
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if cfg.DB == nil {
+		cfg.DB = newDB(t)
 	}
 	s, err := New(cfg)
 	if err != nil {
@@ -44,6 +50,28 @@ func startServer(t *testing.T, cfg Config) (*Server, string) {
 		}
 	})
 	return s, ln.Addr().String()
+}
+
+// newDB opens an in-memory database, closed when the test ends.
+func newDB(t *testing.T) *executor.DB {
+	t.Helper()
+	m := vfs.NewMemFS(1)
+	if err := m.MkdirAll("/db"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SyncDir("/"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := executor.Open(context.Background(), m, "/db", executor.Options{
+		Frames: 256,
+		Now:    func() time.Time { return time.Date(2024, 5, 6, 7, 8, 9, 500000000, time.UTC) },
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close(context.Background()) })
+	return db
 }
 
 // client is a raw protocol client.
@@ -159,7 +187,7 @@ func parameters(ms []msg) []string {
 	return out
 }
 
-func types(ms []msg) string {
+func msgTypes(ms []msg) string {
 	var b []byte
 	for _, m := range ms {
 		b = append(b, m.typ)
@@ -212,7 +240,7 @@ func TestStartupHandshake(t *testing.T) {
 	cl := dial(t, addr)
 	cl.send(startup("user", "alice", "database", "shop", "application_name", "app"))
 	ms := cl.readUntilReady()
-	if got := types(ms); got != "RSSSSSSSSSSSSSKZ" {
+	if got := msgTypes(ms); got != "RSSSSSSSSSSSSSKZ" {
 		t.Fatalf("messages %q", got)
 	}
 	if !bytes.Equal(ms[0].body, []byte{0, 0, 0, 0}) {
@@ -253,7 +281,7 @@ func TestEncryptionRequests(t *testing.T) {
 	cl.send(pgwire.EncodeRequest(pgwire.CodeSSLRequest))
 	readN(cl)
 	cl.send(startup("user", "u"))
-	if got := types(cl.readUntilReady()); got[0] != 'R' {
+	if got := msgTypes(cl.readUntilReady()); got[0] != 'R' {
 		t.Fatalf("%q", got)
 	}
 	// GSS, then SSL, then startup.
@@ -310,18 +338,18 @@ func TestProtocolVersions(t *testing.T) {
 	ms := cl.readUntilReady()
 	want := append([]byte{0, 0, 0, 0, 0, 0, 0, 2}, "_pq_.a\x00_pq_.b\x00"...)
 	if ms[0].typ != 'v' || !bytes.Equal(ms[0].body, want) || ms[1].typ != 'R' {
-		t.Fatalf("%q %q", types(ms), ms[0].body)
+		t.Fatalf("%q %q", msgTypes(ms), ms[0].body)
 	}
 	// 3.0 with an option: listed too. 3.0 alone: no negotiation.
 	cl = dial(t, addr)
 	cl.send(startup("user", "u", "_pq_.x", "y"))
 	if ms := cl.readUntilReady(); ms[0].typ != 'v' {
-		t.Fatalf("%q", types(ms))
+		t.Fatalf("%q", msgTypes(ms))
 	}
 	cl = dial(t, addr)
 	cl.send(pgwire.EncodeStartup(3<<16|1, []pgwire.Param{{Name: "user", Value: "u"}}))
 	if ms := cl.readUntilReady(); ms[0].typ != 'v' || !bytes.Equal(ms[0].body, make([]byte, 8)) {
-		t.Fatalf("%q %q", types(ms), ms[0].body)
+		t.Fatalf("%q %q", msgTypes(ms), ms[0].body)
 	}
 }
 
@@ -411,11 +439,10 @@ func TestAfterStartup(t *testing.T) {
 	cl := dial(t, addr)
 	cl.send(startup("user", "u"))
 	cl.readUntilReady()
-	// A query before Step 5.2: an error, and the session goes on.
+	// A query, and the session goes on.
 	cl.send(message('Q', "SELECT 1\x00"))
-	ms := cl.readUntilReady()
-	if types(ms) != "EZ" || fields(ms[0].body)['C'] != sqlerr.FeatureNotSupported || fields(ms[0].body)['S'] != "ERROR" {
-		t.Fatalf("%q %v", types(ms), fields(ms[0].body))
+	if ms := cl.readUntilReady(); msgTypes(ms) != "TDCZ" {
+		t.Fatalf("%q", msgTypes(ms))
 	}
 	// A malformed Query.
 	cl.send(message('Q', "SELECT 1"))
@@ -442,8 +469,8 @@ func TestAfterStartup(t *testing.T) {
 	cl = dial(t, addr)
 	cl.send(append(startup("user", "u"), message('Q', "SELECT 1\x00")...))
 	cl.readUntilReady()
-	if ms := cl.readUntilReady(); types(ms) != "EZ" {
-		t.Fatalf("%q", types(ms))
+	if ms := cl.readUntilReady(); msgTypes(ms) != "TDCZ" {
+		t.Fatalf("%q", msgTypes(ms))
 	}
 }
 
@@ -494,7 +521,7 @@ func TestStartupTimeout(t *testing.T) {
 	cl.send(startup("user", "u"))
 	cl.readUntilReady()
 	time.Sleep(400 * time.Millisecond)
-	cl.send(message('Q', "x\x00"))
+	cl.send(message('Q', "SELECT 1\x00"))
 	cl.readUntilReady()
 }
 
@@ -610,7 +637,7 @@ func TestPanicIsContained(t *testing.T) {
 }
 
 func TestCloseEndsSessions(t *testing.T) {
-	s, err := New(Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	s, err := New(Config{DB: newDB(t), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +693,7 @@ func TestPsqlConnects(t *testing.T) {
 }
 
 func TestProcessIDsWrapAndSkipLiveOnes(t *testing.T) {
-	s, err := New(Config{})
+	s, err := New(Config{DB: newDB(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +741,7 @@ func (l *flakyListener) Accept() (net.Conn, error) {
 }
 
 func TestAcceptRetriesTemporaryErrors(t *testing.T) {
-	s, err := New(Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	s, err := New(Config{DB: newDB(t), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +759,7 @@ func TestAcceptRetriesTemporaryErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A permanent error ends Serve with it.
-	s2, _ := New(Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	s2, _ := New(Config{DB: newDB(t), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	ln2, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

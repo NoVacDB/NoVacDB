@@ -11,6 +11,11 @@ import (
 	"github.com/vikrant-choudhary06/NoVacDB/internal/storage"
 )
 
+// MaxSelectColumns is PostgreSQL's limit on a SELECT's output columns
+// (MaxTupleAttributeNumber). It also keeps a result's column count inside
+// the protocol's 16-bit field.
+const MaxSelectColumns = 1664
+
 // table looks up a table named in a statement.
 func (st *stmt) table(name ast.Name) (*catalog.Table, error) {
 	if t, ok := st.db.cat.Table(name.Name); ok {
@@ -64,11 +69,14 @@ func (st *stmt) selectStmt(s *ast.Select) (*Result, error) {
 		b = st.rowBinder(tbl, s.From)
 	}
 
-	// Output columns.
+	// Output columns, at most MaxSelectColumns of them.
 	var outs []node
-	var cols []Column
+	cols := []Column{} // non-nil even for an empty select list
 	var exprs []string // each output's expression, to match ORDER BY under DISTINCT
 	for _, t := range s.Targets {
+		if len(cols) >= MaxSelectColumns || t.Star && tbl != nil && len(cols)+len(tbl.Columns) > MaxSelectColumns {
+			return nil, sqlerr.New(sqlerr.TooManyColumns, "target lists can have at most %d entries", MaxSelectColumns).At(st.sql, t.P)
+		}
 		if t.Star {
 			if tbl == nil {
 				return nil, sqlerr.New(sqlerr.SyntaxError, "SELECT * with no tables specified is not valid").At(st.sql, t.P)

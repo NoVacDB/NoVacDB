@@ -20,4 +20,4 @@ Failure & crash, Alternatives, Testing plan, Limitations.
 | [09](09-sql-frontend.md) | SQL lexer, parser, AST and errors (`internal/sql/...`) | Implemented |
 | [10](10-executor.md) | SQL types, rows, catalog, atomic statements, executor (`internal/sql/types`, `internal/catalog`, `internal/sql/executor`) | Implemented |
 | [11](11-sql-logic-tests.md) | SQL logic tests and the SQL crash workload (`tests/sqllogic`, `tests/crash`) | Implemented |
-| [12](12-wire-protocol.md) | PostgreSQL wire protocol (`internal/pgwire`, `internal/server`) | In progress (5.1 implemented) |
+| [12](12-wire-protocol.md) | PostgreSQL wire protocol (`internal/pgwire`, `internal/server`) | In progress (5.1, 5.2 implemented) |

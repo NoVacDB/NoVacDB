@@ -42,6 +42,15 @@ func TestSQLLogic(t *testing.T) {
 // TestRunnerCatchesMismatches checks that the runner fails each kind of
 // wrong expectation, so passing files mean something.
 func TestRunnerCatchesMismatches(t *testing.T) {
+	for _, backend := range []struct {
+		name string
+		open Opener
+	}{{"direct", nil}, {"wire", openWire}} {
+		t.Run(backend.name, func(t *testing.T) { runnerCatchesMismatches(t, backend.open) })
+	}
+}
+
+func runnerCatchesMismatches(t *testing.T, open Opener) {
 	setup := "statement ok\nCREATE TABLE t (a int, b text)\n\nstatement ok\nINSERT INTO t VALUES (1, 'x'), (2, '')\n\n"
 	cases := map[string]string{
 		"wrong value":          "query IT rowsort\nSELECT a, b FROM t\n----\n1|x\n2|y\n",
@@ -60,7 +69,7 @@ func TestRunnerCatchesMismatches(t *testing.T) {
 		"two statements query": "query I\nSELECT 1; SELECT 2\n----\n1\n",
 	}
 	for name, body := range cases {
-		_, err := (&Runner{}).RunFile(context.Background(), name, strings.NewReader(setup+body))
+		_, err := (&Runner{Open: open}).RunFile(context.Background(), name, strings.NewReader(setup+body))
 		var f Failure
 		if !errors.As(err, &f) {
 			t.Errorf("%s: %v, want a Failure", name, err)
@@ -72,7 +81,7 @@ func TestRunnerCatchesMismatches(t *testing.T) {
 		"statement ok INSERT 0 1\nINSERT INTO t VALUES (3, NULL)\n\n" +
 		"statement error 42P01 relation \"nope\" does not exist\nSELECT * FROM nope\n\n" +
 		"restart\n\ncrash\n\nquery IT\nSELECT * FROM t WHERE b IS NULL\n----\n3|NULL\n"
-	if n, err := (&Runner{}).RunFile(context.Background(), "good", strings.NewReader(good)); err != nil || n != 9 {
+	if n, err := (&Runner{Open: open}).RunFile(context.Background(), "good", strings.NewReader(good)); err != nil || n != 9 {
 		t.Fatalf("%d records, %v", n, err)
 	}
 }

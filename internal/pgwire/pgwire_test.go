@@ -32,6 +32,16 @@ func TestBackendMessageBytes(t *testing.T) {
 		{"error, all fields", func(b *Buffer) {
 			b.ErrorResponse(ErrorFields{Severity: "ERROR", Code: "42P01", Message: "m", Detail: "d", Hint: "h", Position: 12})
 		}, append([]byte{'E', 0, 0, 0, 39}, "SERROR\x00VERROR\x00C42P01\x00Mm\x00Dd\x00Hh\x00P12\x00\x00"...)},
+		{"row description", func(b *Buffer) {
+			b.RowDescription([]FieldDescription{{Name: "id", TypeOID: OIDInt4, Size: 4}, {Name: "t", TypeOID: OIDText, Size: -1}})
+		}, append(append([]byte{'T', 0, 0, 0, 47, 0, 2},
+			append([]byte("id\x00"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 23, 0, 4, 0xff, 0xff, 0xff, 0xff, 0, 0)...),
+			append([]byte("t\x00"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0)...)},
+		{"row description, no columns", func(b *Buffer) { b.RowDescription(nil) }, []byte{'T', 0, 0, 0, 6, 0, 0}},
+		{"data row", func(b *Buffer) { b.DataRow([][]byte{[]byte("42"), nil, {}}) },
+			[]byte{'D', 0, 0, 0, 20, 0, 3, 0, 0, 0, 2, '4', '2', 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0}},
+		{"command complete", func(b *Buffer) { b.CommandComplete("INSERT 0 1") }, append([]byte{'C', 0, 0, 0, 15}, "INSERT 0 1\x00"...)},
+		{"empty query", (*Buffer).EmptyQueryResponse, []byte{'I', 0, 0, 0, 4}},
 		{"notice, few fields", func(b *Buffer) { b.NoticeResponse(ErrorFields{Severity: "NOTICE", Code: "00000", Message: "x"}) },
 			append([]byte{'N', 0, 0, 0, 31}, "SNOTICE\x00VNOTICE\x00C00000\x00Mx\x00\x00"...)},
 	}
@@ -46,11 +56,11 @@ func TestBackendMessageBytes(t *testing.T) {
 	var b Buffer
 	b.AuthenticationOk()
 	b.ReadyForQuery(StatusIdle)
-	if len(b.Bytes()) != 9+6 {
-		t.Fatalf("%d bytes", len(b.Bytes()))
+	if len(b.Bytes()) != 9+6 || b.Len() != 9+6 {
+		t.Fatalf("%d bytes, Len %d", len(b.Bytes()), b.Len())
 	}
 	b.Reset()
-	if len(b.Bytes()) != 0 {
+	if len(b.Bytes()) != 0 || b.Len() != 0 {
 		t.Fatal("Reset left bytes")
 	}
 }

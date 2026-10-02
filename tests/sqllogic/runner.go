@@ -145,8 +145,75 @@ func parse(name string, r io.Reader) ([]record, error) {
 	return recs, nil
 }
 
-// typeLetter is the column type letter of a SQL type.
-func typeLetter(t types.Type) byte {
+// Result is a statement's outcome as the runner compares it: its command
+// tag, a type letter per output column (I, R, T, B, D), and rows of values
+// in result-line form (NULL, (empty) for an empty string, otherwise
+// PostgreSQL's text form).
+type Result struct {
+	Tag   string
+	Types string
+	Rows  [][]string
+}
+
+// Session runs SQL for the runner: directly against the executor, or
+// through the wire protocol.
+type Session interface {
+	// Exec runs the statements in sql and returns the results of those
+	// that ran; an error is a *sqlerr.Error.
+	Exec(ctx context.Context, sql string) ([]Result, error)
+	// Close shuts the session and its database down cleanly.
+	Close(ctx context.Context) error
+	// Abandon drops the session as a crash would, writing nothing more.
+	Abandon()
+}
+
+// Opener opens a session on the database in dir.
+type Opener func(ctx context.Context, fsys vfs.FS, dir string, opts executor.Options) (Session, error)
+
+// OpenDirect opens a session that calls the executor directly.
+func OpenDirect(ctx context.Context, fsys vfs.FS, dir string, opts executor.Options) (Session, error) {
+	db, err := executor.Open(ctx, fsys, dir, opts)
+	if err != nil {
+		return nil, err
+	}
+	return directSession{db}, nil
+}
+
+type directSession struct{ db *executor.DB }
+
+func (d directSession) Exec(ctx context.Context, sql string) ([]Result, error) {
+	rs, err := d.db.Exec(ctx, sql)
+	out := make([]Result, len(rs))
+	for i, r := range rs {
+		out[i] = convert(r)
+	}
+	return out, err
+}
+
+func (d directSession) Close(ctx context.Context) error { return d.db.Close(ctx) }
+
+func (directSession) Abandon() {} // its handles die with the crashed file system
+
+// convert renders an executor result in the runner's form.
+func convert(r *executor.Result) Result {
+	out := Result{Tag: r.Tag}
+	letters := make([]byte, len(r.Columns))
+	for i, c := range r.Columns {
+		letters[i] = TypeLetter(c.Type)
+	}
+	out.Types = string(letters)
+	for _, row := range r.Rows {
+		vals := make([]string, len(row))
+		for i, v := range row {
+			vals[i] = formatValue(v)
+		}
+		out.Rows = append(out.Rows, vals)
+	}
+	return out
+}
+
+// TypeLetter is the column type letter of a SQL type.
+func TypeLetter(t types.Type) byte {
 	switch t {
 	case types.Int4, types.Int8:
 		return 'I'
@@ -174,13 +241,9 @@ func formatValue(v types.Value) string {
 
 // result renders a query result as lines: one row per line with values
 // separated by "|", or one value per line under valuesort.
-func result(r *executor.Result, sortMode string) []string {
+func result(r Result, sortMode string) []string {
 	var lines []string
-	for _, row := range r.Rows {
-		vals := make([]string, len(row))
-		for i, v := range row {
-			vals[i] = formatValue(v)
-		}
+	for _, vals := range r.Rows {
 		if sortMode == "valuesort" {
 			lines = append(lines, vals...)
 		} else {
@@ -197,6 +260,8 @@ func result(r *executor.Result, sortMode string) []string {
 type Runner struct {
 	// Frames is the buffer pool size; zero takes the executor's default.
 	Frames int
+	// Open opens sessions; nil means OpenDirect.
+	Open Opener
 }
 
 // RunFile runs one test file and returns how many records passed. It
@@ -219,7 +284,11 @@ func (rn *Runner) RunFile(ctx context.Context, name string, r io.Reader) (record
 		Now:    func() time.Time { return Now },
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	db, err := executor.Open(ctx, m, dbDir, opts)
+	open := rn.Open
+	if open == nil {
+		open = OpenDirect
+	}
+	db, err := open(ctx, m, dbDir, opts)
 	if err != nil {
 		return 0, err
 	}
@@ -239,10 +308,11 @@ func (rn *Runner) RunFile(ctx context.Context, name string, r io.Reader) (record
 					return records, fail("closing: %v", err)
 				}
 			} else {
-				m.Crash(vfs.CrashOptions{TearLast: true}) // the old db is gone with its handles
+				m.Crash(vfs.CrashOptions{TearLast: true})
+				db.Abandon()
 			}
 			db = nil
-			if db, err = executor.Open(ctx, m, dbDir, opts); err != nil {
+			if db, err = open(ctx, m, dbDir, opts); err != nil {
 				return records, fail("reopening: %v", err)
 			}
 		case "statement":
@@ -281,15 +351,10 @@ func (rn *Runner) RunFile(ctx context.Context, name string, r io.Reader) (record
 			if len(rs) != 1 {
 				return records, fail("%d results; a query must be one statement", len(rs))
 			}
-			r := rs[0]
-			got := make([]byte, len(r.Columns))
-			for i, c := range r.Columns {
-				got[i] = typeLetter(c.Type)
+			if rs[0].Types != rec.types {
+				return records, fail("column types %s; want %s", rs[0].Types, rec.types)
 			}
-			if string(got) != rec.types {
-				return records, fail("column types %s; want %s", got, rec.types)
-			}
-			lines := result(r, rec.sortMode)
+			lines := result(rs[0], rec.sortMode)
 			want := rec.want
 			if rec.sortMode != "nosort" {
 				want = append([]string(nil), want...)

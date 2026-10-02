@@ -1,6 +1,6 @@
 # 12 — PostgreSQL Wire Protocol (`internal/pgwire`, `internal/server`)
 
-Status: **Designed for Phase 5 (Steps 5.1–5.4); approved. Implemented so far: 5.1.** Step 5.1 (startup and authentication) is designed in full here. Steps 5.2–5.4 are outlined in section 2.6 so that 5.1's choices fit them, and are detailed in this document when their step starts.
+Status: **Designed for Phase 5 (Steps 5.1–5.4); approved. Implemented so far: 5.1, 5.2.** Step 5.1 (startup and authentication) is designed in full here. Steps 5.2–5.4 are outlined in section 2.6 so that 5.1's choices fit them, and are detailed in this document when their step starts.
 
 ## 1. Problem
 
@@ -94,7 +94,7 @@ At most two encryption requests (one of each kind) are accepted before the start
 
 ### 2.4 After startup, in Step 5.1
 
-Only `Terminate` (`X`) is fully handled: the server closes the connection. A `Query` (`Q`) gets an `ERROR 0A000` "the simple query protocol is not implemented yet" followed by `ReadyForQuery`, so `psql` stays usable and reports it, until 5.2 replaces it. Any other message type is `FATAL 08P01` "invalid frontend message type *N*" and the connection closes, as PostgreSQL does for unknown types.
+(Replaced by section 2.8 in Step 5.2.) Only `Terminate` (`X`) is fully handled: the server closes the connection. A `Query` (`Q`) gets an `ERROR 0A000` "the simple query protocol is not implemented yet" followed by `ReadyForQuery`, so `psql` stays usable and reports it, until 5.2 replaces it. Any other message type is `FATAL 08P01` "invalid frontend message type *N*" and the connection closes, as PostgreSQL does for unknown types.
 
 ### 2.5 Errors and notices
 
@@ -102,7 +102,7 @@ Only `Terminate` (`X`) is fully handled: the server closes the connection. A `Qu
 
 ### 2.6 Steps 5.2–5.4, in outline
 
-- **5.2 Simple query.** `Query` runs `executor.DB.Exec` statement by statement: `RowDescription` (column names, type OIDs: `int4` 23, `int8` 20, `float8` 701, `text` 25, `bool` 16, `timestamptz` 1184; text format), `DataRow`s in the text output form, `CommandComplete` with the tag, `NoticeResponse` for notices, `EmptyQueryResponse` for an empty string, then `ReadyForQuery`. An error stops the rest of the string, as PostgreSQL's implicit transaction does (except that earlier statements stay committed: 10-executor.md section 5). Rows are streamed in batches rather than built whole (needs an executor cursor API; designed in 5.2).
+- **5.2 Simple query.** Designed in 2.8.
 - **5.3 Extended query.** `Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`, named and unnamed statements and portals, text-format parameters (`$1` binds as an untyped literal of the parameter's declared or inferred type), binary result formats for the six types. Errors skip to `Sync`.
 - **5.4 Connections.** A connection limit (`--max-connections`, default 1000: goroutines are cheap; problem #12/#13 in WORKFLOW.md), `CancelRequest` (cancels the target connection's statement context; a cancelled write that has begun applying still finishes, 10-executor.md section 2.4), idle and startup timeouts, and graceful shutdown: stop accepting, let running statements finish up to a deadline, send `FATAL 57P01` "terminating connection due to administrator command", close the database (final checkpoint).
 
@@ -114,9 +114,62 @@ Only `Terminate` (`X`) is fully handled: the server closes the connection. A `Qu
 - **The cancel request code is protocol "1234.5678".** A version check that looked only at the major number would treat it as protocol 1234; the startup loop recognises the three request codes first, so the tests' "unsupported protocol" cases use 1234.5677.
 - **Verified with real clients:** `psql` 16 connects (with `sslmode=prefer`, after the declined `SSLRequest`), shows the 5.1 query error, and `\conninfo` reports the database and user; `pg_isready` reports "accepting connections"; a refused `TimeZone` setting is shown as the server's `FATAL`; the server stops cleanly on SIGTERM. An integration test runs `psql` whenever it is installed.
 
+### 2.8 Simple query protocol (Step 5.2)
+
+A `Query` message carries a string of zero or more statements. The server runs it with `executor.DB.Exec`, which runs the statements in order and stops at the first error, and answers:
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant S as NoVacDB
+    C->>S: Query "CREATE ...; INSERT ...; SELECT ..."
+    S->>C: CommandComplete "CREATE TABLE"
+    S->>C: CommandComplete "INSERT 0 2"
+    S->>C: RowDescription, DataRow × n, CommandComplete "SELECT n"
+    S->>C: ReadyForQuery 'I'
+```
+
+- **For each statement that ran:** its notices as `NoticeResponse` (severity `NOTICE`, with the notice's SQLSTATE: `42P07` for "relation ... already exists, skipping", `00000` for "... does not exist, skipping", as PostgreSQL), then, for a `SELECT`, `RowDescription` and one `DataRow` per row, then `CommandComplete` with the command tag.
+- **If a statement failed:** `ErrorResponse` (severity `ERROR`, with the code, message, detail, hint and position the executor reports; the position counts characters in the whole query string, as PostgreSQL's does). The statements after it do not run. The statements before it stay committed (10-executor.md section 5: there are no transactions yet, so this is where NoVacDB differs from PostgreSQL's implicit transaction around a multi-statement string).
+- **An empty string** (nothing but whitespace, comments and semicolons) gets `EmptyQueryResponse`.
+- **Then `ReadyForQuery`** with status `I` (idle): with no transactions, the session is always idle between queries.
+
+**RowDescription** describes each column as PostgreSQL does for a computed column: name, table OID 0, attribute number 0, the type's OID and size, type modifier −1, and format 0 (text).
+
+| type | OID | size |
+|---|---|---|
+| `integer` | 23 (`int4`) | 4 |
+| `bigint` | 20 (`int8`) | 8 |
+| `double precision` | 701 (`float8`) | 8 |
+| `text` | 25 (`text`) | −1 |
+| `boolean` | 16 (`bool`) | 1 |
+| `timestamptz` | 1184 (`timestamptz`) | 8 |
+
+(PostgreSQL reports the source table and column for plain column references; clients use them only for updatable result sets, which nothing here supports. Zero is valid and means "not a column".)
+
+**DataRow** values are the text output forms of 10-executor.md section 2.1, exactly what `psql` prints (`t`/`f`, `2024-01-02 03:04:05+00`, shortest-exact doubles); NULL is length −1.
+
+**Results are built whole, then sent.** The executor builds a statement's rows before returning them (10-executor.md section 8), and the read lock is released before any byte goes to the client, so a slow client never holds up writers. Sending streams the built rows through the connection's buffer, flushing every 64 KiB, so the protocol side adds no second copy of a large result. Streaming rows from the executor (a cursor API) waits for Phase 7, where large results become common.
+
+**Context.** Each query runs with a context that is cancelled when the server shuts down; Step 5.4's `CancelRequest` will cancel it too. A client that disconnects is noticed when the server next writes or reads.
+
+**Other messages, until Step 5.3:** the extended-protocol messages (`Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Flush`) get one `ERROR 0A000` "the extended query protocol is not implemented yet", after which the server discards messages until `Sync` and then sends `ReadyForQuery`, exactly as PostgreSQL recovers from an error in an extended-protocol sequence; `Sync` alone gets `ReadyForQuery`. `FunctionCall` gets `ERROR 0A000` and `ReadyForQuery`. `CopyData`, `CopyDone` and `CopyFail` outside a COPY are ignored, as PostgreSQL does. Anything else is `FATAL 08P01` as in 5.1.
+
+**What does not work yet, and why it is not hidden:** `BEGIN`, `COMMIT`, `SET`, `SHOW` and queries on `pg_catalog` (which `psql`'s `\d` commands send) are syntax or unknown-table errors until transactions (Phase 6) and catalog compatibility (Phase 9). They fail with PostgreSQL's error codes, so clients report them clearly.
+
+### 2.9 Implementation notes (Step 5.2)
+
+- **Notices carry their SQLSTATE.** The executor's notices became `{Code, Message}` pairs (`42P07` for "already exists, skipping", `00000` for "does not exist, skipping"), so `NoticeResponse` has the same `C` field as PostgreSQL's.
+- **`SELECT FROM t` (an empty select list) is a result.** PostgreSQL sends a `RowDescription` of no columns and one empty `DataRow` per row, and `psql` prints `--` and `(n rows)`. The executor returned no column list for it, which the server took for a statement without rows; every `SELECT` result now has a non-nil column list, empty or not.
+- **At most 1664 output columns.** `RowDescription` and `DataRow` count columns in 16 bits, so a select list of 70,000 entries corrupted the stream (found by trying it with `psql`). The executor now refuses more than 1664, PostgreSQL's limit, with `54011` "target lists can have at most 1664 entries" at the first target past the limit; `*` counts every column it expands to.
+- **Wide rows.** Trying a 1000-column table for the limit above found a crash from Step 4.3: encoding a row of more than 488 columns made its first buffer with a capacity smaller than its length. Fixed, with a round-trip test of rows up to 1600 columns.
+- **`Config.DB` is required.** `server.New` refuses a nil database; tests use an in-memory one.
+- **The SQL logic tests run over the wire too.** The runner works through a `Session` interface; besides the executor directly, every test file now runs through a server on loopback TCP with a small protocol client in the test code, so all 250 records check what the protocol carries.
+- **Verified with real `psql` 16:** creating, filling, querying, updating and deleting; aligned output of every type and NULL; errors with `LINE 1:` and the caret under the position; notices; several `-c` commands; `SELECT FROM t`; the column limit; a clean stop on SIGTERM. An integration test runs these through `psql` whenever it is installed.
+
 ## 3. Formats
 
-Messages exactly as in PostgreSQL's documentation, chapter 55.7 (protocol 3.0). Step 5.1 sends `R` (AuthenticationOk, 9 bytes: `R`, length 8, 0), `S`, `K`, `Z`, `E`, `N`, `v`, and the single byte `N` for declined encryption; it reads the startup packets of section 2.3 and the type-byte messages `X` and `Q`. Nothing is stored on disk.
+Messages exactly as in PostgreSQL's documentation, chapter 55.7 (protocol 3.0). Step 5.1 sends `R` (AuthenticationOk, 9 bytes: `R`, length 8, 0), `S`, `K`, `Z`, `E`, `N`, `v`, and the single byte `N` for declined encryption; it reads the startup packets of section 2.3 and the type-byte messages `X` and `Q`. Step 5.2 adds `T` (RowDescription), `D` (DataRow), `C` (CommandComplete) and `I` (EmptyQueryResponse), and reads the messages listed in 2.8. Nothing is stored on disk.
 
 ## 4. Concurrency
 
@@ -133,6 +186,8 @@ One goroutine per connection, plus the accept loop. Connections share only the `
 | Client closes or the network fails at any point | The connection's goroutine ends and releases its cancel key; the server and other connections are unaffected. |
 | A message longer than 16 MiB | `FATAL 08P01` before reading its body, close. |
 | Unknown message type | `FATAL 08P01`, close. |
+| A statement fails | `ERROR` with its SQLSTATE; the rest of the query string does not run; the session continues. |
+| The client hangs up in the middle of a result | The next write fails, the connection's goroutine ends; the statement had already finished. |
 | Panic while serving a connection (a bug) | Recovered in that goroutine, logged with the stack, `FATAL XX000` sent if possible, connection closed. The server keeps running. |
 | The database cannot be opened at startup | The process exits with an error before listening. |
 
@@ -144,12 +199,13 @@ One goroutine per connection, plus the accept loop. Connections share only the `
 - **`server_version` "0.5".** Honest, but drivers would conclude it is PostgreSQL 0.5 and either refuse to connect or fall back to ancient SQL.
 - **A third-party protocol library.** Ruled out by the zero-dependency rule, and the protocol is small.
 
-## 7. Testing plan (Step 5.1)
+## 7. Testing plan (Steps 5.1 and 5.2)
 
 - **Codec:** every backend message's bytes against hand-written golden bytes; the startup decoder on valid packets with every parameter, and on every truncation, missing terminator, trailing byte, bad length and duplicate; `FuzzStartup` (no panic, and any accepted packet re-encodes to the same parameters) and `FuzzMessageReader` (arbitrary bytes never make it allocate more than the limit or panic).
 - **Handshake, over real loopback TCP against an in-process server:** plain startup; `SSLRequest` then startup; `GSSENCRequest` then `SSLRequest` then startup; a third encryption request; data pipelined after `SSLRequest`; protocol 2.0, 4.0 and 3.2 (`NegotiateProtocolVersion` listing `_pq_.` options); missing user; database defaulting to the user; each parameter rule of 2.3 including `options`; the exact sequence and values of `ParameterStatus`; distinct cancel keys across connections; `Terminate`; a `Query` before 5.2; an unknown message type; an oversized message (rejected without reading its body); a client that stalls during startup (closed after the timeout, made short in tests); abrupt disconnects at every byte of the handshake; many concurrent handshakes under `-race`.
 - **A real client:** `psql -h localhost -p 5433 -c ''`-style connection check in an integration test that runs only when `psql` is installed (it is in CI's image and here), plus the manual steps in the step's notes.
 - **Command:** `novacdb` starts, listens, logs its address, and exits cleanly on SIGTERM.
+- **Step 5.2:** golden bytes of the new messages; every type's OID, size and text form over TCP; NULL against the empty string; several statements in one query, stopping at the first error with earlier ones kept; notices with their codes; empty queries; the extended-protocol messages skipped to `Sync`, again after each `Sync`; a 2.5 MB result in many writes and in order; clients hanging up in the middle of it; concurrent sessions updating the same rows under `-race`; pipelined queries; `psql` end to end; and all SQL logic test files through the server.
 
 ## 8. Limitations
 

@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -32,7 +33,7 @@ var ErrServerClosed = errors.New("server: closed")
 
 // Config configures a Server.
 type Config struct {
-	// DB is the database queries run against (from Step 5.2).
+	// DB is the database queries run against. Required.
 	DB *executor.DB
 	// Logger receives connection events; nil means slog.Default().
 	Logger *slog.Logger
@@ -48,6 +49,9 @@ type Config struct {
 type Server struct {
 	cfg Config
 	log *slog.Logger
+	// ctx is the context queries run with: cancelled by Close.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu        sync.Mutex
 	closed    bool
@@ -64,6 +68,9 @@ type Server struct {
 
 // New returns a Server.
 func New(cfg Config) (*Server, error) {
+	if cfg.DB == nil {
+		return nil, errors.New("server: Config.DB is required")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -77,7 +84,10 @@ func New(cfg Config) (*Server, error) {
 	if _, err := rand.Read(seed[:]); err != nil {
 		return nil, fmt.Errorf("seeding connection IDs: %w", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
+		ctx:       ctx,
+		cancel:    cancel,
 		cfg:       cfg,
 		log:       cfg.Logger,
 		listeners: map[net.Listener]struct{}{},
@@ -193,6 +203,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.cancel() // running queries stop at their next cancellation point
 	var errs []error
 	for ln := range s.listeners {
 		if err := ln.Close(); err != nil {

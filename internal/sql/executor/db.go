@@ -57,9 +57,16 @@ type Result struct {
 	// Tag is PostgreSQL's command tag: "SELECT 2", "INSERT 0 1",
 	// "CREATE TABLE", ...
 	Tag     string
-	Columns []Column        // SELECT only
+	Columns []Column        // SELECT only, and non-nil for every SELECT
 	Rows    [][]types.Value // SELECT only
-	Notices []string
+	Notices []Notice
+}
+
+// Notice is a message about a statement that succeeded, such as "relation
+// "t" already exists, skipping", with its SQLSTATE.
+type Notice struct {
+	Code    string
+	Message string
 }
 
 // DB is an open database. It is safe for concurrent use: SELECTs run
