@@ -162,7 +162,7 @@ In-house sqllogictest runner (no dependencies), initial test files covering ever
 ## Phase 5 — PostgreSQL wire protocol (MVP)
 
 ### 👉 Step 5.1 — Startup and authentication
-TCP listener, `SSLRequest`/`GSSENCRequest` declined, startup message, trust authentication, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`. Design doc `11-wire-protocol.md`.
+TCP listener, `SSLRequest`/`GSSENCRequest` declined, startup message, trust authentication, `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`. Design doc `12-wire-protocol.md`.
 
 ### ⬜ Step 5.2 — Simple query protocol
 `Query` → `RowDescription`, `DataRow`, `CommandComplete`, `ErrorResponse` with correct SQLSTATE codes, `EmptyQueryResponse`. Type OIDs for supported types.
