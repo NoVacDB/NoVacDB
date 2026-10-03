@@ -1,0 +1,128 @@
+# Operators, three-valued logic, predicates, CASE and functions.
+
+query IIIIII
+SELECT 7 / 2, -7 / 2, 7 % 3, -7 % 3, 2 + 3 * 4, (2 + 3) * 4
+----
+3|-3|1|-1|14|20
+
+query RRR
+SELECT 7 / 2.0, 2 ^ 10, 2 ^ 0.5
+----
+3.5|1024|1.4142135623730951
+
+statement error 22012 division by zero
+SELECT 1 / 0
+
+statement error 22012 division by zero
+SELECT 1 % 0
+
+statement error 22012 division by zero
+SELECT 1.0 / 0
+
+statement error 42883 operator does not exist: integer + boolean
+SELECT 1 + true
+
+statement error 42883 operator does not exist: double precision % double precision
+SELECT 5.5 % 2
+
+statement error 42725 operator is not unique: unknown + unknown
+SELECT '1' + '2'
+
+query TTT
+SELECT 'a' || 'b', 'n' || 1, 1.5 || 'x'
+----
+ab|n1|1.5x
+
+query TT
+SELECT 'x' || NULL, 'is ' || true
+----
+NULL|is true
+
+# Three-valued logic.
+query BBBBBB
+SELECT true AND NULL, false AND NULL, true OR NULL, false OR NULL, NOT NULL::boolean, NULL = NULL
+----
+NULL|f|t|NULL|NULL|NULL
+
+query BBBB
+SELECT NULL IS NULL, 1 IS NOT NULL, NULL::boolean IS UNKNOWN, NULL::boolean IS NOT TRUE
+----
+t|t|t|t
+
+query BBB
+SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1.0
+----
+f|t|t
+
+# IN and BETWEEN with NULLs.
+query BBBBB
+SELECT 2 IN (1, 2), 3 IN (1, 2), 3 IN (1, NULL), 1 IN (1, NULL), 3 NOT IN (1, NULL)
+----
+t|f|NULL|t|NULL
+
+query BBBB
+SELECT 2 BETWEEN 1 AND 3, 0 BETWEEN 1 AND 3, 2 NOT BETWEEN 1 AND 3, NULL BETWEEN 1 AND 3
+----
+t|f|f|NULL
+
+# LIKE and ILIKE.
+query BBBBBB
+SELECT 'hello' LIKE 'h%', 'hello' LIKE 'h_llo', 'hello' LIKE 'H%', 'hello' ILIKE 'H%', '50%' LIKE '50\%', 'abc' NOT LIKE '%b%'
+----
+t|t|f|t|t|f
+
+statement error 22025
+SELECT 'a' LIKE 'a\'
+
+# CASE.
+query TTT
+SELECT CASE WHEN 1 > 2 THEN 'a' WHEN 2 > 1 THEN 'b' END, CASE 3 WHEN 1 THEN 'one' ELSE 'other' END, CASE WHEN false THEN 'x' END
+----
+b|other|NULL
+
+query R
+SELECT CASE WHEN true THEN 1 ELSE 2.5 END
+----
+1
+
+statement error 42804 CASE types integer and text cannot be matched
+SELECT CASE WHEN true THEN 1 ELSE 'a'::text END
+
+# Evaluation stops early, as in PostgreSQL's executor.
+query BBI
+SELECT false AND 1 / 0 = 1, true OR 1 / 0 = 1, CASE WHEN true THEN 1 ELSE 1 / 0 END
+----
+f|t|1
+
+# Functions.
+query TTIII
+SELECT lower('AbC'), upper('héllo'), length('héllo'), length(''), abs(-5)
+----
+abc|HéLLO|5|0|5
+
+query RIIR
+SELECT abs(-2.5), coalesce(NULL, 2, 3), nullif(1, 1), greatest(1, 2.5)
+----
+2.5|2|NULL|2.5
+
+query ITTD
+SELECT least(5, NULL, 3), greatest('a', 'b'), coalesce(NULL, 'x'), now()
+----
+3|b|x|2024-05-06 07:08:09.5+00
+
+query I
+SELECT nullif(1, 2)
+----
+1
+
+statement error 42883 function nope(integer) does not exist
+SELECT nope(1)
+
+statement error 42883 function lower(integer) does not exist
+SELECT lower(1)
+
+statement error 42725 function abs(unknown) is not unique
+SELECT abs('1')
+
+statement error 22003 integer out of range
+SELECT abs(-2147483648)

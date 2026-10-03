@@ -1,0 +1,50 @@
+version: "2"
+
+run:
+  go: "1.22"
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - errorlint
+    - bodyclose
+    - misspell
+    - nilerr
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - copyloopvar
+    - gocritic
+    - revive
+    - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: use log/slog in library code
+        - pattern: ^log\.(Print|Fatal|Panic).*$
+          msg: use log/slog in library code
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: error-naming
+        - name: error-strings
+  exclusions:
+    rules:
+      # main may write usage/errors to its injected writer.
+      - path: cmd/novacdb/
+        linters: [forbidigo]
+      # Test cleanup (Close in defer) failures are not interesting.
+      - path: _test\.go
+        linters: [errcheck]
+
+formatters:
+  enable:
+    - gofmt

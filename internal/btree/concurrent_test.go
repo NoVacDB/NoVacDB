@@ -1,0 +1,455 @@
+package btree
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// concModel is a model shared by concurrent writers. A writer locks a key's
+// stripe around both the tree operation and the model update, so the model
+// always agrees with the tree for keys whose stripe is unlocked, while the
+// writers still share leaves, splits and merges.
+type concModel struct {
+	stripes [64]sync.Mutex
+	mu      sync.Mutex
+	m       model
+}
+
+func (c *concModel) stripe(k []byte) *sync.Mutex {
+	return &c.stripes[binary.LittleEndian.Uint32(append(bytes.Clone(k), 0, 0, 0, 0))%64]
+}
+
+// phaseBarrier makes the writers enter each grow or shrink phase together,
+// so the phases overlap however the goroutines are scheduled: a writer that
+// runs ahead would otherwise grow while the others shrink, and the tree
+// might never shrink enough to merge. A failed writer breaks the barrier so
+// the others do not wait for it forever.
+type phaseBarrier struct {
+	mu      sync.Mutex
+	n       int
+	waiting int
+	gen     chan struct{}
+	broken  bool
+}
+
+func newPhaseBarrier(n int) *phaseBarrier {
+	return &phaseBarrier{n: n, gen: make(chan struct{})}
+}
+
+func (b *phaseBarrier) wait() {
+	b.mu.Lock()
+	if b.broken {
+		b.mu.Unlock()
+		return
+	}
+	b.waiting++
+	if b.waiting == b.n {
+		close(b.gen)
+		b.gen = make(chan struct{})
+		b.waiting = 0
+		b.mu.Unlock()
+		return
+	}
+	ch := b.gen
+	b.mu.Unlock()
+	<-ch
+}
+
+func (b *phaseBarrier) breakAll() {
+	b.mu.Lock()
+	if !b.broken {
+		b.broken = true
+		close(b.gen)
+	}
+	b.mu.Unlock()
+}
+
+// concKey makes keys from a shared space, with a stable prefix for keys
+// that are never touched after setup.
+func concKey(stable bool, n int, pad int) []byte {
+	k := []byte{'w'}
+	if stable {
+		k[0] = 's'
+	}
+	k = binary.BigEndian.AppendUint32(k, uint32(n))
+	return append(k, make([]byte, pad)...)
+}
+
+func runConcurrent(t *testing.T, tr *Tree, writers, readers, scanners, opsPerWriter, pad int) {
+	t.Helper()
+	seed := testSeed(t)
+	cm := &concModel{m: model{}}
+	// Stable keys interleave with the writers' keys: every leaf has some.
+	const stableKeys = 500
+	stable := map[string]bool{}
+	for i := range stableKeys {
+		k := concKey(true, i*97, pad)
+		if err := tr.Insert(bg, k, []byte("stable")); err != nil {
+			t.Fatal(err)
+		}
+		cm.m[string(k)] = []byte("stable")
+		stable[string(k)] = true
+	}
+	var stop atomic.Bool
+	var wg, bg2 sync.WaitGroup
+	errc := make(chan error, writers+readers+scanners)
+	var reads, scans, scanned atomic.Int64
+	phases := newPhaseBarrier(writers)
+	phaseLen := max(opsPerWriter/6, 1)
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewPCG(seed, uint64(w)))
+			for op := range opsPerWriter {
+				if op > 0 && op%phaseLen == 0 {
+					phases.wait()
+				}
+				growing := (op/phaseLen)%2 == 0
+				k := concKey(false, rng.IntN(stableKeys)*97+1+rng.IntN(6), pad)
+				mu := cm.stripe(k)
+				mu.Lock()
+				cm.mu.Lock()
+				_, present := cm.m[string(k)]
+				cm.mu.Unlock()
+				var err error
+				if (growing && rng.IntN(100) < 75) || (!growing && rng.IntN(100) < 8) {
+					v := []byte(fmt.Sprintf("w%d-%d", w, op))
+					err = tr.Insert(bg, k, v)
+					if present && !errors.Is(err, ErrKeyExists) || !present && err != nil {
+						err = fmt.Errorf("insert (present=%v): %w", present, err)
+					} else {
+						err = nil
+						if !present {
+							cm.mu.Lock()
+							cm.m[string(k)] = v
+							cm.mu.Unlock()
+						}
+					}
+				} else {
+					var found bool
+					found, err = tr.Delete(bg, k)
+					if err == nil && found != present {
+						err = fmt.Errorf("delete found=%v, model %v", found, present)
+					}
+					if err == nil && found {
+						cm.mu.Lock()
+						delete(cm.m, string(k))
+						cm.mu.Unlock()
+					}
+				}
+				mu.Unlock()
+				if err != nil {
+					phases.breakAll()
+					errc <- fmt.Errorf("writer %d op %d: %w", w, op, err)
+					return
+				}
+			}
+		}()
+	}
+	for r := range readers {
+		bg2.Add(1)
+		go func() {
+			defer bg2.Done()
+			rng := rand.New(rand.NewPCG(seed, uint64(1000+r)))
+			for !stop.Load() {
+				k := concKey(true, rng.IntN(stableKeys)*97, pad)
+				v, ok, err := tr.Get(bg, k)
+				if err != nil || !ok || string(v) != "stable" {
+					errc <- fmt.Errorf("reader: Get(stable %x) = %q, %v: %w", k[:5], v, ok, err)
+					return
+				}
+				reads.Add(1)
+			}
+		}()
+	}
+	for s := range scanners {
+		bg2.Add(1)
+		go func() {
+			defer bg2.Done()
+			rng := rand.New(rand.NewPCG(seed, uint64(2000+s)))
+			for !stop.Load() {
+				var start, end Bound
+				if rng.IntN(2) == 0 {
+					start = Incl(concKey(true, rng.IntN(stableKeys/2)*97, pad))
+					end = Excl(concKey(true, (stableKeys/2+rng.IntN(stableKeys/2))*97, pad))
+				}
+				it := tr.Scan(start, end)
+				var prev []byte
+				seenStable := 0
+				for {
+					k, _, ok, err := it.Next(bg)
+					if err != nil {
+						errc <- fmt.Errorf("scanner: %w", err)
+						return
+					}
+					if !ok {
+						break
+					}
+					if prev != nil && bytes.Compare(prev, k) >= 0 {
+						errc <- fmt.Errorf("scanner: %x after %x", k[:5], prev[:5])
+						return
+					}
+					prev = k
+					if stable[string(k)] {
+						seenStable++
+					}
+					scanned.Add(1)
+				}
+				want := 0
+				for k := range stable {
+					if inRange([]byte(k), start, end) {
+						want++
+					}
+				}
+				if seenStable != want {
+					errc <- fmt.Errorf("scanner: saw %d of %d stable keys", seenStable, want)
+					return
+				}
+				scans.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	stop.Store(true)
+	bg2.Wait()
+	close(errc)
+	for err := range errc {
+		t.Fatal(err)
+	}
+	st := cm.m.verify(t, tr)
+	t.Logf("%d keys at the end, %+v; %d reads, %d scans (%d entries); %+v", len(cm.m), st, reads.Load(), scans.Load(), scanned.Load(), tr.opCounts())
+	if readers > 0 && reads.Load() == 0 || scanners > 0 && scans.Load() == 0 {
+		t.Fatal("readers or scanners never ran")
+	}
+	c := tr.opCounts()
+	if c.splits[0] == 0 || c.merges[0] == 0 {
+		t.Fatalf("no concurrent splits or merges: %+v", c)
+	}
+}
+
+func TestConcurrentWritersReadersScanners(t *testing.T) {
+	for _, logged := range []bool{false, true} {
+		for _, pad := range []int{60, 700} {
+			t.Run(fmt.Sprintf("logged=%v,pad=%d", logged, pad), func(t *testing.T) {
+				const writers, readers, scanners = 6, 3, 2
+				var opts []Option
+				var bpFrames = 16 * (writers + readers + scanners)
+				var tr *Tree
+				var err error
+				if logged {
+					e := newLoggedEnv(t, bpFrames)
+					opts = append(opts, WithLogger(e.lg))
+					tr, err = Create(bg, e.bp, opts...)
+				} else {
+					tr, err = Create(bg, newPool(t, bpFrames))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				runConcurrent(t, tr, writers, readers, scanners, opsBudget(t)/20, pad)
+			})
+		}
+	}
+}
+
+func TestConcurrentWritersOnly(t *testing.T) {
+	// No readers: writers contend with each other alone, on a small pool
+	// that keeps evicting.
+	tr, err := Create(bg, newPool(t, 8*8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runConcurrent(t, tr, 8, 0, 0, opsBudget(t)/15, 100)
+}
+
+func TestConcurrentLeftSiblingRepairs(t *testing.T) {
+	// Repairs of a node that is not its parent's first child latch the
+	// left sibling after the node itself, against the usual left-to-right
+	// order (design doc section 2.9). Deleters empty the right part of
+	// every leaf group, so their leaves repair with their left siblings,
+	// while inserters write into those left siblings and readers and
+	// scanners run through both. A watchdog fails the test if it stalls.
+	for _, logged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("logged=%v", logged), func(t *testing.T) {
+			var tr *Tree
+			var err error
+			if logged {
+				e := newLoggedEnv(t, 96)
+				tr, err = Create(bg, e.bp, WithLogger(e.lg))
+			} else {
+				tr, err = Create(bg, newPool(t, 96))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := testSeed(t)
+			const groups, perGroup, pad = 24, 256, 120
+			key := func(g, i int) []byte {
+				return append(binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint32([]byte{'k'}, uint32(g)), uint32(i)), make([]byte, pad)...)
+			}
+			// The first half of group g's keys is "left" (even keys stay,
+			// odd ones come and go); the second half is "right", deleted
+			// from its end and reinserted, round after round.
+			cm := &concModel{m: model{}}
+			for g := range groups {
+				for i := range perGroup {
+					if i%2 == 0 || i >= perGroup/2 {
+						k := key(g, i)
+						if err := tr.Insert(bg, k, []byte("v")); err != nil {
+							t.Fatal(err)
+						}
+						cm.m[string(k)] = []byte("v")
+					}
+				}
+			}
+			before := tr.opCounts()
+			var stop atomic.Bool
+			var wg, rg sync.WaitGroup
+			errc := make(chan error, 16)
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-done:
+				case <-time.After(2 * time.Minute):
+					buf := make([]byte, 1<<20)
+					n := runtime.Stack(buf, true)
+					errc <- fmt.Errorf("stalled (deadlock?); goroutines:\n%s", buf[:n])
+					stop.Store(true)
+				}
+			}()
+			for w := range 4 {
+				wg.Add(1)
+				go func() { // deleters and re-inserters of right halves
+					defer wg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(w)))
+					for round := 0; round < 8 && !stop.Load(); round++ {
+						for g := w; g < groups; g += 4 {
+							for i := perGroup - 1; i >= perGroup/2; i-- {
+								k := key(g, i)
+								mu := cm.stripe(k)
+								mu.Lock()
+								var err error
+								if round%2 == 0 {
+									var found bool
+									found, err = tr.Delete(bg, k)
+									if err == nil && found {
+										cm.mu.Lock()
+										delete(cm.m, string(k))
+										cm.mu.Unlock()
+									}
+								} else if rng.IntN(4) > 0 {
+									if err = tr.Insert(bg, k, []byte("r")); err == nil {
+										cm.mu.Lock()
+										cm.m[string(k)] = []byte("r")
+										cm.mu.Unlock()
+									}
+								}
+								mu.Unlock()
+								if err != nil {
+									errc <- err
+									return
+								}
+							}
+						}
+					}
+				}()
+			}
+			for w := range 2 {
+				wg.Add(1)
+				go func() { // inserters and deleters of the left halves' odd keys
+					defer wg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(100+w)))
+					for range 3000 {
+						if stop.Load() {
+							return
+						}
+						k := key(rng.IntN(groups), 1+2*rng.IntN(perGroup/4))
+						mu := cm.stripe(k)
+						mu.Lock()
+						cm.mu.Lock()
+						_, present := cm.m[string(k)]
+						cm.mu.Unlock()
+						var err error
+						if present {
+							if _, err = tr.Delete(bg, k); err == nil {
+								cm.mu.Lock()
+								delete(cm.m, string(k))
+								cm.mu.Unlock()
+							}
+						} else if err = tr.Insert(bg, k, []byte("l")); err == nil {
+							cm.mu.Lock()
+							cm.m[string(k)] = []byte("l")
+							cm.mu.Unlock()
+						}
+						mu.Unlock()
+						if err != nil {
+							errc <- err
+							return
+						}
+					}
+				}()
+			}
+			for r := range 3 {
+				rg.Add(1)
+				go func() { // readers of the never-deleted keys, and scanners
+					defer rg.Done()
+					rng := rand.New(rand.NewPCG(seed, uint64(200+r)))
+					for !stop.Load() {
+						k := key(rng.IntN(groups), 2*rng.IntN(perGroup/4))
+						v, ok, err := tr.Get(bg, k)
+						if err != nil {
+							errc <- err
+							return
+						}
+						if !ok || string(v) != "v" {
+							errc <- fmt.Errorf("Get of a stable key: %q, %v", v, ok)
+							return
+						}
+						it := tr.Scan(Incl(key(rng.IntN(groups), 0)), Bound{})
+						var prev []byte
+						for n := 0; n < 200; n++ {
+							k, _, ok, err := it.Next(bg)
+							if err != nil {
+								errc <- err
+								return
+							}
+							if !ok {
+								break
+							}
+							if prev != nil && bytes.Compare(prev, k) >= 0 {
+								errc <- fmt.Errorf("scan out of order")
+								return
+							}
+							prev = k
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			stop.Store(true)
+			rg.Wait()
+			close(done)
+			close(errc)
+			for err := range errc {
+				t.Fatal(err)
+			}
+			cm.m.verify(t, tr)
+			c := tr.opCounts()
+			merges := c.leftMerges[0] - before.leftMerges[0]
+			redist := c.redist[0][1] - before.redist[0][1]
+			t.Logf("left-sibling repairs of leaves: %d merges, %d redistributions (%+v)", merges, redist, c)
+			if merges < 50 || redist < 5 {
+				t.Fatalf("only %d merges and %d redistributions with a left sibling: the test misses its target", merges, redist)
+			}
+		})
+	}
+}

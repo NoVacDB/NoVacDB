@@ -1,0 +1,144 @@
+# CREATE TABLE, CREATE INDEX, DROP TABLE, DROP INDEX, and their errors.
+
+statement ok CREATE TABLE
+CREATE TABLE users (id bigint PRIMARY KEY, email text UNIQUE NOT NULL, name text DEFAULT 'anonymous', age integer, UNIQUE (name, age))
+
+# Constraint indexes are named as PostgreSQL names them.
+statement error 42809 "users_pkey" is an index
+SELECT * FROM users_pkey
+
+statement error 42809
+SELECT * FROM users_email_key
+
+statement error 42809
+SELECT * FROM users_name_age_key
+
+statement error 42P07 relation "users" already exists
+CREATE TABLE users (x int)
+
+statement ok CREATE TABLE
+CREATE TABLE IF NOT EXISTS users (x int)
+
+statement error 42P07 relation "users_pkey" already exists
+CREATE TABLE users_pkey (x int)
+
+statement error 42P16 multiple primary keys for table "t" are not allowed
+CREATE TABLE t (a int PRIMARY KEY, b int, PRIMARY KEY (b))
+
+statement error 42701 column "a" specified more than once
+CREATE TABLE t (a int, a text)
+
+statement error 42703 column "c" named in key does not exist
+CREATE TABLE t (a int, UNIQUE (c))
+
+statement error 42939
+CREATE TABLE novac_mine (a int)
+
+statement error 22P02 invalid input syntax for type integer: "x"
+CREATE TABLE t (a int DEFAULT 'x')
+
+statement error 42804 column "a" is of type integer but expression is of type boolean
+CREATE TABLE t (a int DEFAULT true)
+
+statement error 0A000 cannot use column reference in DEFAULT expression
+CREATE TABLE t (a int, b int DEFAULT a)
+
+statement error 42601 conflicting NULL/NOT NULL declarations
+CREATE TABLE t (a int NULL NOT NULL)
+
+# Nothing above created t.
+statement error 42P01 relation "t" does not exist
+SELECT * FROM t
+
+# Indexes: generated names, numbered on a clash.
+statement ok CREATE INDEX
+CREATE INDEX ON users (age)
+
+statement ok
+CREATE INDEX ON users (age)
+
+statement ok
+CREATE INDEX named ON users (name, age)
+
+statement ok CREATE INDEX
+CREATE INDEX IF NOT EXISTS named ON users (email)
+
+statement error 42P07 relation "named" already exists
+CREATE INDEX named ON users (email)
+
+statement error 42703 column "nope" does not exist
+CREATE INDEX ON users (nope)
+
+statement error 42P01 relation "nope" does not exist
+CREATE INDEX ON nope (a)
+
+statement error 42809
+SELECT * FROM users_age_idx
+
+statement error 42809
+SELECT * FROM users_age_idx1
+
+statement ok DROP INDEX
+DROP INDEX users_age_idx1
+
+statement error 42704 index "users_age_idx1" does not exist
+DROP INDEX users_age_idx1
+
+statement ok DROP INDEX
+DROP INDEX IF EXISTS users_age_idx1
+
+statement error 2BP01 cannot drop index "users_pkey" because it is the primary key
+DROP INDEX users_pkey
+
+statement error 42809 "users" is not an index
+DROP INDEX users
+
+statement error 42809 "named" is not a table
+DROP TABLE named
+
+# Everything survives a restart and a crash.
+restart
+
+statement error 42809
+SELECT * FROM users_age_idx
+
+crash
+
+statement error 42809
+SELECT * FROM named
+
+statement error 42P01
+SELECT * FROM users_age_idx1
+
+statement ok DROP TABLE
+DROP TABLE users
+
+statement error 42P01 table "users" does not exist
+DROP TABLE users
+
+statement ok DROP TABLE
+DROP TABLE IF EXISTS users
+
+# Its indexes went with it, and the names are free again.
+statement ok
+CREATE TABLE named (users_pkey int PRIMARY KEY)
+
+statement ok
+CREATE TABLE users (a int)
+
+statement error 42P07 relation "named" already exists
+CREATE INDEX named ON users (a)
+
+crash
+
+query I
+SELECT users_pkey FROM named
+----
+
+# Every type can be a column; tables can be empty of rows.
+statement ok
+CREATE TABLE all_types (i integer, b bigint, f double precision, t text, o boolean, ts timestamptz)
+
+query IIRTBD
+SELECT * FROM all_types
+----

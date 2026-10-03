@@ -1,0 +1,21 @@
+# Build output
+bin/
+# Local database files
+data/
+# Coverage
+*.out
+coverage.*
+# Fuzz cache (seed corpora under testdata/fuzz are kept)
+**/testdata/fuzz/*/*-*-*-*-*
+# OS and editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+# Local tool config
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/

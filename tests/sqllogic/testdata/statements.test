@@ -1,0 +1,60 @@
+# Syntax errors, unsupported statements, and several statements in one
+# string.
+
+# FORM is read as a column alias, as in PostgreSQL.
+statement error 42601 syntax error at or near "t"
+SELECT 1 FORM t
+
+statement error 42601 syntax error at end of input
+SELECT 1 +
+
+statement error 42601
+CREATE TABLE (a int)
+
+statement error 42601 unterminated quoted string
+SELECT 'abc
+
+# A PostgreSQL type NoVacDB does not have yet, and one nobody has.
+statement error 0A000 type money is not supported yet
+CREATE TABLE t (a money)
+
+statement error 42704 type "frob" does not exist
+CREATE TABLE t (a frob)
+
+statement error 42P02 there is no parameter $1
+SELECT $1
+
+statement error 42601 syntax error at or near "DEFAULT"
+SELECT DEFAULT
+
+# Several statements run in order; each that succeeds stays committed,
+# and an error stops the rest.
+statement ok
+CREATE TABLE t (a int PRIMARY KEY); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)
+
+statement error 23505
+INSERT INTO t VALUES (3); INSERT INTO t VALUES (1); INSERT INTO t VALUES (4)
+
+query I
+SELECT a FROM t ORDER BY a
+----
+1
+2
+3
+
+# A syntax error anywhere stops everything before it runs.
+statement error 42601
+INSERT INTO t VALUES (5); SELECT FROM WHERE
+
+query I
+SELECT a FROM t WHERE a = 5
+----
+
+# Empty statements are fine.
+statement ok
+;;INSERT INTO t VALUES (6);;
+
+query I
+SELECT a FROM t WHERE a > 3
+----
+6
